@@ -379,6 +379,7 @@
 #define GST_MATROSKA_CODEC_ID_VIDEO_AV1          "V_AV1"
 #define GST_MATROSKA_CODEC_ID_VIDEO_MPEGH_HEVC   "V_MPEGH/ISO/HEVC"
 #define GST_MATROSKA_CODEC_ID_VIDEO_PRORES       "V_PRORES"
+#define GST_MATROSKA_CODEC_ID_VIDEO_FFV1         "V_FFV1"
 
 #define GST_MATROSKA_CODEC_ID_AUDIO_MPEG1_L1       "A_MPEG/L1"
 #define GST_MATROSKA_CODEC_ID_AUDIO_MPEG1_L2       "A_MPEG/L2"
@@ -687,6 +688,8 @@ typedef struct _Wavpack4Header {
   guint32 flags;         /* various flags for id and decoding              */
   guint32 crc;           /* crc for actual decoded data                    */
 } Wavpack4Header;
+
+#define WAVPACK4_HEADER_SIZE (32)
 
 typedef enum {
   GST_MATROSKA_TRACK_ENCODING_SCOPE_FRAME = (1<<0),

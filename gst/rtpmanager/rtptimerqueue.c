@@ -18,6 +18,7 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#include <string.h>
 
 #include <gst/rtp/gstrtpbuffer.h>
 
@@ -390,22 +391,25 @@ rtp_timer_queue_new (void)
 /**
  * rtp_timer_queue_insert:
  * @queue: the #RtpTimerQueue object
- * @timer: the #RtpTimer to insert
+ * @timer: (transfer full): the #RtpTimer to insert
  *
  * Insert a timer into the queue. Earliest timer are at the head and then
  * timer are sorted by seqnum (smaller seqnum first). This function is o(n)
  * but it is expected that most timers added are schedule later, in which case
  * the insertion will be faster.
  *
- * Returns: %FLASE is a timer with the same seqnum already existed
+ * Returns: %FALSE if a timer with the same seqnum already existed
  */
 gboolean
 rtp_timer_queue_insert (RtpTimerQueue * queue, RtpTimer * timer)
 {
   g_return_val_if_fail (timer->queued == FALSE, FALSE);
 
-  if (rtp_timer_queue_find (queue, timer->seqnum))
+  if (rtp_timer_queue_find (queue, timer->seqnum)) {
+    rtp_timer_free (timer);
+    GST_WARNING ("Timer queue collision, freeing duplicate.");
     return FALSE;
+  }
 
   if (timer->timeout == -1)
     rtp_timer_queue_insert_head (queue, timer);
@@ -554,7 +558,6 @@ rtp_timer_queue_remove_all (RtpTimerQueue * queue)
  * @queue: the #RtpTimerQueue
  * @type: the #RtpTimerType
  * @senum: the timer seqnum
- * @num: the number of seqnum in the range (partially supported)
  * @timeout: the timer timeout
  * @delay: the additional delay (will be added to @timeout)
  * @duration: the duration of the event related to the timer
@@ -566,7 +569,7 @@ rtp_timer_queue_remove_all (RtpTimerQueue * queue)
  */
 void
 rtp_timer_queue_set_timer (RtpTimerQueue * queue, RtpTimerType type,
-    guint16 seqnum, guint num, GstClockTime timeout, GstClockTime delay,
+    guint16 seqnum, GstClockTime timeout, GstClockTime delay,
     GstClockTime duration, GstClockTimeDiff offset)
 {
   RtpTimer *timer;
@@ -590,7 +593,6 @@ rtp_timer_queue_set_timer (RtpTimerQueue * queue, RtpTimerType type,
 
   timer->type = type;
   timer->seqnum = seqnum;
-  timer->num = num;
 
   if (timeout == -1)
     timer->timeout = -1;
@@ -622,7 +624,7 @@ void
 rtp_timer_queue_set_expected (RtpTimerQueue * queue, guint16 seqnum,
     GstClockTime timeout, GstClockTime delay, GstClockTime duration)
 {
-  rtp_timer_queue_set_timer (queue, RTP_TIMER_EXPECTED, seqnum, 0, timeout,
+  rtp_timer_queue_set_timer (queue, RTP_TIMER_EXPECTED, seqnum, timeout,
       delay, duration, 0);
 }
 
@@ -630,7 +632,6 @@ rtp_timer_queue_set_expected (RtpTimerQueue * queue, guint16 seqnum,
  * rtp_timer_queue_set_lost:
  * @queue: the #RtpTimerQueue
  * @senum: the timer seqnum
- * @num: the number of seqnum in the range (partially supported)
  * @timeout: the timer timeout
  * @duration: the duration of the event related to the timer
  * @offset: offset that can be used to convert the timeout to timestamp
@@ -640,10 +641,9 @@ rtp_timer_queue_set_expected (RtpTimerQueue * queue, guint16 seqnum,
  */
 void
 rtp_timer_queue_set_lost (RtpTimerQueue * queue, guint16 seqnum,
-    guint num, GstClockTime timeout, GstClockTime duration,
-    GstClockTimeDiff offset)
+    GstClockTime timeout, GstClockTime duration, GstClockTimeDiff offset)
 {
-  rtp_timer_queue_set_timer (queue, RTP_TIMER_LOST, seqnum, num, timeout, 0,
+  rtp_timer_queue_set_timer (queue, RTP_TIMER_LOST, seqnum, timeout, 0,
       duration, offset);
 }
 
@@ -661,8 +661,7 @@ void
 rtp_timer_queue_set_eos (RtpTimerQueue * queue, GstClockTime timeout,
     GstClockTimeDiff offset)
 {
-  rtp_timer_queue_set_timer (queue, RTP_TIMER_EOS, -1, 0, timeout, 0, 0,
-      offset);
+  rtp_timer_queue_set_timer (queue, RTP_TIMER_EOS, -1, timeout, 0, 0, offset);
 }
 
 /**
@@ -680,7 +679,7 @@ void
 rtp_timer_queue_set_deadline (RtpTimerQueue * queue, guint16 seqnum,
     GstClockTime timeout, GstClockTimeDiff offset)
 {
-  rtp_timer_queue_set_timer (queue, RTP_TIMER_DEADLINE, seqnum, 0, timeout, 0,
+  rtp_timer_queue_set_timer (queue, RTP_TIMER_DEADLINE, seqnum, timeout, 0,
       0, offset);
 }
 

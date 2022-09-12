@@ -289,6 +289,7 @@ struct _GstQTMux
   guint64 interleave_bytes;
   GstClockTime interleave_time;
   gboolean interleave_bytes_set, interleave_time_set;
+  gboolean force_chunks;
 
   GstClockTime max_raw_audio_drift;
 
@@ -312,6 +313,8 @@ struct _GstQTMux
   gboolean reserved_prefill;
 
   GstClockTime start_gap_threshold;
+
+  gboolean force_create_timecode_trak;
 
   /* for request pad naming */
   guint video_pads, audio_pads, subtitle_pads, caption_pads;

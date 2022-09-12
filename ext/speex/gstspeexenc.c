@@ -217,6 +217,8 @@ gst_speex_enc_class_init (GstSpeexEncClass * klass)
       "Encodes audio in Speex format", "Wim Taymans <wim@fluendo.com>");
 
   GST_DEBUG_CATEGORY_INIT (speexenc_debug, "speexenc", 0, "Speex encoder");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_SPEEX_ENC_MODE, 0);
 }
 
 static void
@@ -718,7 +720,8 @@ gst_speex_enc_handle_frame (GstAudioEncoder * benc, GstBuffer * buf)
 
     /* create header buffer */
     data = (guint8 *) speex_header_to_packet (&enc->header, &data_len);
-    buf1 = gst_buffer_new_wrapped (data, data_len);
+    buf1 = gst_buffer_new_wrapped_full (0,
+        data, data_len, 0, data_len, data, (GDestroyNotify) speex_header_free);
     GST_BUFFER_OFFSET_END (buf1) = 0;
     GST_BUFFER_OFFSET (buf1) = 0;
 

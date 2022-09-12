@@ -131,7 +131,7 @@ gst_jack_audio_sink_free_channels (GstJackAudioSink * sink)
 static GType
 gst_jack_ring_buffer_get_type (void)
 {
-  static volatile gsize ringbuffer_type = 0;
+  static gsize ringbuffer_type = 0;
 
   if (g_once_init_enter (&ringbuffer_type)) {
     static const GTypeInfo ringbuffer_info = {
@@ -177,6 +177,9 @@ gst_jack_ring_buffer_class_init (GstJackRingBufferClass * klass)
   gstringbuffer_class->stop = GST_DEBUG_FUNCPTR (gst_jack_ring_buffer_stop);
 
   gstringbuffer_class->delay = GST_DEBUG_FUNCPTR (gst_jack_ring_buffer_delay);
+
+  gst_type_mark_as_plugin_api (GST_TYPE_JACK_CONNECT, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_JACK_TRANSPORT, 0);
 }
 
 /* this is the callback of jack. This should RT-safe.

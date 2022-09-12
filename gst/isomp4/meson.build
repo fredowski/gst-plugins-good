@@ -5,6 +5,8 @@ mp4_sources = [
   'qtdemux_types.c',
   'qtdemux_dump.c',
   'qtdemux_lang.c',
+  'qtdemux_tags.c',
+  'qtdemux_tree.c',
   'gstisoff.c',
   'gstqtmux.c',
   'gstqtmoovrecover.c',

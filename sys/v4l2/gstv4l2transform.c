@@ -115,9 +115,11 @@ gst_v4l2_transform_get_property (GObject * object,
 static gboolean
 gst_v4l2_transform_open (GstV4l2Transform * self)
 {
+  GstV4l2Error error = GST_V4L2_ERROR_INIT;
+
   GST_DEBUG_OBJECT (self, "Opening");
 
-  if (!gst_v4l2_object_open (self->v4l2output))
+  if (!gst_v4l2_object_open (self->v4l2output, &error))
     goto failure;
 
   if (!gst_v4l2_object_open_shared (self->v4l2capture, self->v4l2output))
@@ -159,6 +161,8 @@ failure:
 
   gst_caps_replace (&self->probed_srccaps, NULL);
   gst_caps_replace (&self->probed_sinkcaps, NULL);
+
+  gst_v4l2_error (self, &error);
 
   return FALSE;
 }
@@ -893,7 +897,8 @@ gst_v4l2_transform_prepare_output_buffer (GstBaseTransform * trans,
   /* Ensure input internal pool is active */
   if (!gst_buffer_pool_is_active (pool)) {
     GstStructure *config = gst_buffer_pool_get_config (pool);
-    gint min = MAX (GST_V4L2_MIN_BUFFERS, self->v4l2output->min_buffers);
+    gint min = MAX (GST_V4L2_MIN_BUFFERS (self->v4l2output),
+        self->v4l2output->min_buffers);
 
     if (self->v4l2output->mode == GST_V4L2_IO_USERPTR ||
         self->v4l2output->mode == GST_V4L2_IO_DMABUF_IMPORT) {

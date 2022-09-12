@@ -919,6 +919,7 @@ gst_soup_http_src_session_open (GstSoupHTTPSrc * src)
   if (!src->session) {
     GstQuery *query;
     gboolean can_share = (src->timeout == DEFAULT_TIMEOUT)
+        && (src->cookies == NULL)
         && (src->ssl_strict == DEFAULT_SSL_STRICT)
         && (src->tls_interaction == NULL) && (src->proxy == NULL)
         && (src->tls_database == DEFAULT_TLS_DATABASE)
@@ -1172,8 +1173,9 @@ gst_soup_http_src_got_headers (GstSoupHTTPSrc * src, SoupMessage * msg)
   gst_event_unref (http_headers_event);
 
   /* Parse Content-Length. */
-  if (soup_message_headers_get_encoding (msg->response_headers) ==
-      SOUP_ENCODING_CONTENT_LENGTH) {
+  if (SOUP_STATUS_IS_SUCCESSFUL (msg->status_code) &&
+      (soup_message_headers_get_encoding (msg->response_headers) ==
+          SOUP_ENCODING_CONTENT_LENGTH)) {
     newsize = src->request_position +
         soup_message_headers_get_content_length (msg->response_headers);
     if (!src->have_size || (src->content_size != newsize)) {
@@ -1415,7 +1417,8 @@ gst_soup_http_src_parse_status (SoupMessage * msg, GstSoupHTTPSrc * src)
      * a body message, requests that go beyond the content limits will result
      * in an error. Here we convert those to EOS */
     if (msg->status_code == SOUP_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE &&
-        src->have_body && !src->have_size) {
+        src->have_body && (!src->have_size ||
+            (src->request_position >= src->content_size))) {
       GST_DEBUG_OBJECT (src, "Requested range out of limits and received full "
           "body, returning EOS");
       return GST_FLOW_EOS;
@@ -1502,10 +1505,14 @@ gst_soup_http_src_build_message (GstSoupHTTPSrc * src, const gchar * method)
       soup_message_headers_append (src->msg->request_headers, "Cookie",
           *cookie);
     }
+
+    soup_message_disable_feature (src->msg, SOUP_TYPE_COOKIE_JAR);
   }
 
-  if (!src->compress)
-    soup_message_disable_feature (src->msg, SOUP_TYPE_CONTENT_DECODER);
+  if (!src->compress) {
+    soup_message_headers_append (src->msg->request_headers, "Accept-Encoding",
+        "identity");
+  }
 
   soup_message_set_flags (src->msg, SOUP_MESSAGE_OVERWRITE_CHUNKS |
       (src->automatic_redirect ? 0 : SOUP_MESSAGE_NO_REDIRECT));

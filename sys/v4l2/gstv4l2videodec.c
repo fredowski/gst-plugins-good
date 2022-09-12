@@ -119,11 +119,12 @@ static gboolean
 gst_v4l2_video_dec_open (GstVideoDecoder * decoder)
 {
   GstV4l2VideoDec *self = GST_V4L2_VIDEO_DEC (decoder);
+  GstV4l2Error error = GST_V4L2_ERROR_INIT;
   GstCaps *codec_caps;
 
   GST_DEBUG_OBJECT (self, "Opening");
 
-  if (!gst_v4l2_object_open (self->v4l2output))
+  if (!gst_v4l2_object_open (self->v4l2output, &error))
     goto failure;
 
   if (!gst_v4l2_object_open_shared (self->v4l2capture, self->v4l2output))
@@ -154,6 +155,8 @@ failure:
 
   gst_caps_replace (&self->probed_srccaps, NULL);
   gst_caps_replace (&self->probed_sinkcaps, NULL);
+
+  gst_v4l2_error (self, &error);
 
   return FALSE;
 }
@@ -221,6 +224,34 @@ gst_v4l2_video_dec_stop (GstVideoDecoder * decoder)
 }
 
 static gboolean
+compatible_caps (GstV4l2VideoDec * self, GstCaps * new_caps)
+{
+  GstCaps *current_caps, *caps1, *caps2;
+  GstStructure *s;
+  gboolean ret;
+
+  current_caps = gst_v4l2_object_get_current_caps (self->v4l2output);
+  if (!current_caps)
+    return FALSE;
+
+  caps1 = gst_caps_copy (current_caps);
+  s = gst_caps_get_structure (caps1, 0);
+  gst_structure_remove_field (s, "framerate");
+
+  caps2 = gst_caps_copy (new_caps);
+  s = gst_caps_get_structure (caps2, 0);
+  gst_structure_remove_field (s, "framerate");
+
+  ret = gst_caps_is_equal (caps1, caps2);
+
+  gst_caps_unref (caps1);
+  gst_caps_unref (caps2);
+  gst_caps_unref (current_caps);
+
+  return ret;
+}
+
+static gboolean
 gst_v4l2_video_dec_set_format (GstVideoDecoder * decoder,
     GstVideoCodecState * state)
 {
@@ -231,7 +262,7 @@ gst_v4l2_video_dec_set_format (GstVideoDecoder * decoder,
   GST_DEBUG_OBJECT (self, "Setting format: %" GST_PTR_FORMAT, state->caps);
 
   if (self->input_state) {
-    if (gst_v4l2_object_caps_equal (self->v4l2output, state->caps)) {
+    if (compatible_caps (self, state->caps)) {
       GST_DEBUG_OBJECT (self, "Compatible caps");
       goto done;
     }
@@ -621,8 +652,12 @@ gst_v4l2_video_dec_handle_frame (GstVideoDecoder * decoder,
     /* Ensure input internal pool is active */
     if (!gst_buffer_pool_is_active (pool)) {
       GstStructure *config = gst_buffer_pool_get_config (pool);
+      guint min = MAX (self->v4l2output->min_buffers,
+          GST_V4L2_MIN_BUFFERS (self->v4l2output));
+      guint max = VIDEO_MAX_FRAME;
+
       gst_buffer_pool_config_set_params (config, self->input_state->caps,
-          self->v4l2output->info.size, 2, 2);
+          self->v4l2output->info.size, min, max);
 
       /* There is no reason to refuse this config */
       if (!gst_buffer_pool_set_config (pool, config))
@@ -646,6 +681,10 @@ gst_v4l2_video_dec_handle_frame (GstVideoDecoder * decoder,
      * padding. */
     if (!gst_v4l2_object_acquire_format (self->v4l2capture, &info))
       goto not_negotiated;
+
+    /* gst_v4l2_object_acquire_format() does not set fps, copy from sink */
+    info.fps_n = self->v4l2output->info.fps_n;
+    info.fps_d = self->v4l2output->info.fps_d;
 
     /* Create caps from the acquired format, remove the format field */
     acquired_caps = gst_video_info_to_caps (&info);
@@ -1046,7 +1085,7 @@ gst_v4l2_video_dec_subclass_init (gpointer g_class, gpointer data)
       gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
           cdata->src_caps));
 
-  gst_element_class_set_static_metadata (element_class, cdata->longname,
+  gst_element_class_set_metadata (element_class, cdata->longname,
       "Codec/Decoder/Video/Hardware", cdata->description,
       "Nicolas Dufresne <nicolas.dufresne@collabora.com>");
 
@@ -1175,17 +1214,18 @@ gst_v4l2_video_dec_register (GstPlugin * plugin, const gchar * basename,
       continue;
     }
 
-    if (cdata->codec != NULL) {
-      GValue *value = gst_v4l2_codec_probe_levels (cdata->codec, video_fd);
-      if (value != NULL) {
-        gst_caps_set_value (cdata->sink_caps, "level", value);
-        g_value_unset (value);
+    if (cdata->codec != NULL && cdata->codec != gst_v4l2_vp8_get_codec ()
+        && cdata->codec != gst_v4l2_vp9_get_codec ()) {
+      GValue value = G_VALUE_INIT;
+
+      if (gst_v4l2_codec_probe_levels (cdata->codec, video_fd, &value)) {
+        gst_caps_set_value (cdata->sink_caps, "level", &value);
+        g_value_unset (&value);
       }
 
-      value = gst_v4l2_codec_probe_profiles (cdata->codec, video_fd);
-      if (value != NULL) {
-        gst_caps_set_value (cdata->sink_caps, "profile", value);
-        g_value_unset (value);
+      if (gst_v4l2_codec_probe_profiles (cdata->codec, video_fd, &value)) {
+        gst_caps_set_value (cdata->sink_caps, "profile", &value);
+        g_value_unset (&value);
       }
     }
 

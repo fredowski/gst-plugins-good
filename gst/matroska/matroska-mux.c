@@ -143,7 +143,8 @@ static GstStaticPadTemplate videosink_templ =
         "video/x-prores, "
         COMMON_VIDEO_CAPS "; "
         "video/x-wmv, " "wmvversion = (int) [ 1, 3 ], " COMMON_VIDEO_CAPS "; "
-        "video/x-av1, " COMMON_VIDEO_CAPS)
+        "video/x-av1, " COMMON_VIDEO_CAPS ";"
+        "video/x-ffv, ffversion = (int) 1, " COMMON_VIDEO_CAPS)
     );
 
 #define COMMON_AUDIO_CAPS \
@@ -970,13 +971,19 @@ gst_matroska_mux_video_pad_setcaps (GstPad * pad, GstCaps * caps)
 
   if ((old_caps = gst_pad_get_current_caps (pad))) {
     if (mux->state >= GST_MATROSKA_MUX_STATE_HEADER
-        && !gst_caps_is_equal (caps, old_caps)) {
+        && !gst_caps_is_subset (caps, old_caps)) {
       GST_ELEMENT_ERROR (mux, STREAM, MUX, (NULL),
-          ("Caps changes are not supported by Matroska"));
+          ("Caps changes are not supported by Matroska\nCurrent: `%"
+              GST_PTR_FORMAT "`\nNew: `%" GST_PTR_FORMAT "`", old_caps, caps));
       gst_caps_unref (old_caps);
       goto refuse_caps;
     }
     gst_caps_unref (old_caps);
+  } else if (mux->state >= GST_MATROSKA_MUX_STATE_HEADER) {
+    GST_ELEMENT_ERROR (mux, STREAM, MUX, (NULL),
+        ("Caps on pad %" GST_PTR_FORMAT
+            " arrived late. Headers were already written", pad));
+    goto refuse_caps;
   }
 
   /* find context */
@@ -1243,6 +1250,12 @@ skip_details:
     gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_VIDEO_AV1);
     gst_matroska_mux_free_codec_priv (context);
     /* Create av1C header */
+    if (codec_buf != NULL)
+      gst_buffer_extract_dup (codec_buf, 0, gst_buffer_get_size (codec_buf),
+          &context->codec_priv, &context->codec_priv_size);
+  } else if (!strcmp (mimetype, "video/x-ffv")) {
+    gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_VIDEO_FFV1);
+    gst_matroska_mux_free_codec_priv (context);
     if (codec_buf != NULL)
       gst_buffer_extract_dup (codec_buf, 0, gst_buffer_get_size (codec_buf),
           &context->codec_priv, &context->codec_priv_size);
@@ -1834,6 +1847,11 @@ gst_matroska_mux_audio_pad_setcaps (GstPad * pad, GstCaps * caps)
       goto refuse_caps;
     }
     gst_caps_unref (old_caps);
+  } else if (mux->state >= GST_MATROSKA_MUX_STATE_HEADER) {
+    GST_ELEMENT_ERROR (mux, STREAM, MUX, (NULL),
+        ("Caps on pad %" GST_PTR_FORMAT
+            " arrived late. Headers were already written", pad));
+    goto refuse_caps;
   }
 
   /* find context */
@@ -2252,6 +2270,7 @@ gst_matroska_mux_subtitle_pad_setcaps (GstPad * pad, GstCaps * caps)
   GstMatroskaTrackSubtitleContext *scontext;
   GstMatroskaMux *mux;
   GstMatroskaPad *collect_pad;
+  GstCollectData *data;
   const gchar *mimetype;
   GstStructure *structure;
   const GValue *value = NULL;
@@ -2270,11 +2289,18 @@ gst_matroska_mux_subtitle_pad_setcaps (GstPad * pad, GstCaps * caps)
       goto refuse_caps;
     }
     gst_caps_unref (old_caps);
+  } else if (mux->state >= GST_MATROSKA_MUX_STATE_HEADER) {
+    GST_ELEMENT_ERROR (mux, STREAM, MUX, (NULL),
+        ("Caps on pad %" GST_PTR_FORMAT
+            " arrived late. Headers were already written", pad));
+    goto refuse_caps;
   }
 
   /* find context */
   collect_pad = (GstMatroskaPad *) gst_pad_get_element_private (pad);
   g_assert (collect_pad);
+  data = (GstCollectData *) (collect_pad);
+
   context = collect_pad->track;
   g_assert (context);
   g_assert (context->type == GST_MATROSKA_TRACK_TYPE_SUBTITLE);
@@ -2350,6 +2376,13 @@ gst_matroska_mux_subtitle_pad_setcaps (GstPad * pad, GstCaps * caps)
   GST_DEBUG_OBJECT (pad, "codec_id %s, codec data size %" G_GSIZE_FORMAT,
       GST_STR_NULL (context->codec_id), context->codec_priv_size);
 
+  /* This pad is sparse. Now that we have caps on it, we can tell collectpads
+   * not to actually wait for data when muxing */
+  GST_COLLECT_PADS_STREAM_LOCK (mux->collect);
+  GST_COLLECT_PADS_STATE_UNSET (data, GST_COLLECT_PADS_STATE_LOCKED);
+  gst_collect_pads_set_waiting (mux->collect, data, FALSE);
+  GST_COLLECT_PADS_STREAM_UNLOCK (mux->collect);
+
 exit:
 
   return ret;
@@ -2387,7 +2420,6 @@ gst_matroska_mux_request_new_pad (GstElement * element,
   GstMatroskaCapsFunc capsfunc = NULL;
   GstMatroskaTrackContext *context = NULL;
   gint pad_id;
-  gboolean locked = TRUE;
   const gchar *id = NULL;
 
   if (templ == gst_element_class_get_pad_template (klass, "audio_%u")) {
@@ -2434,7 +2466,6 @@ gst_matroska_mux_request_new_pad (GstElement * element,
     context->name = g_strdup ("Subtitle");
     /* setcaps may only provide proper one a lot later */
     id = "S_SUB_UNKNOWN";
-    locked = FALSE;
   } else {
     GST_WARNING_OBJECT (mux, "This is not our template!");
     return NULL;
@@ -2447,7 +2478,7 @@ gst_matroska_mux_request_new_pad (GstElement * element,
   collect_pad = (GstMatroskaPad *)
       gst_collect_pads_add_pad (mux->collect, GST_PAD (newpad),
       sizeof (GstMatroskaPad),
-      (GstCollectDataDestroyNotify) gst_matroska_pad_free, locked);
+      (GstCollectDataDestroyNotify) gst_matroska_pad_free, TRUE);
 
   collect_pad->mux = mux;
   collect_pad->track = context;
@@ -2532,6 +2563,8 @@ gst_matroska_mux_write_mastering_metadata (GstMatroskaMux * mux,
   guint64 master;
   GstVideoMasteringDisplayInfo *minfo = &videocontext->mastering_display_info;
   gdouble value;
+  const gdouble chroma_scale = 50000;
+  const gdouble luma_scale = 50000;
 
   if (!videocontext->mastering_display_info_present)
     return;
@@ -2539,34 +2572,34 @@ gst_matroska_mux_write_mastering_metadata (GstMatroskaMux * mux,
   master =
       gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_MASTERINGMETADATA);
 
-  gst_util_fraction_to_double (minfo->Rx_n, minfo->Rx_d, &value);
+  value = (gdouble) minfo->display_primaries[0].x / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_PRIMARYRCHROMATICITYX, value);
 
-  gst_util_fraction_to_double (minfo->Ry_n, minfo->Ry_d, &value);
+  value = (gdouble) minfo->display_primaries[0].y / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_PRIMARYRCHROMATICITYY, value);
 
-  gst_util_fraction_to_double (minfo->Gx_n, minfo->Gx_d, &value);
+  value = (gdouble) minfo->display_primaries[1].x / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_PRIMARYGCHROMATICITYX, value);
 
-  gst_util_fraction_to_double (minfo->Gy_n, minfo->Gy_d, &value);
+  value = (gdouble) minfo->display_primaries[1].y / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_PRIMARYGCHROMATICITYY, value);
 
-  gst_util_fraction_to_double (minfo->Bx_n, minfo->Bx_d, &value);
+  value = (gdouble) minfo->display_primaries[2].x / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_PRIMARYBCHROMATICITYX, value);
 
-  gst_util_fraction_to_double (minfo->By_n, minfo->By_d, &value);
+  value = (gdouble) minfo->display_primaries[2].y / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_PRIMARYBCHROMATICITYY, value);
 
-  gst_util_fraction_to_double (minfo->Wx_n, minfo->Wx_d, &value);
+  value = (gdouble) minfo->white_point.x / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_WHITEPOINTCHROMATICITYX, value);
 
-  gst_util_fraction_to_double (minfo->Wy_n, minfo->Wy_d, &value);
+  value = (gdouble) minfo->white_point.y / chroma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_WHITEPOINTCHROMATICITYY, value);
 
-  gst_util_fraction_to_double (minfo->max_luma_n, minfo->max_luma_d, &value);
+  value = (gdouble) minfo->max_display_mastering_luminance / luma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_LUMINANCEMAX, value);
 
-  gst_util_fraction_to_double (minfo->min_luma_n, minfo->min_luma_d, &value);
+  value = (gdouble) minfo->min_display_mastering_luminance / luma_scale;
   gst_ebml_write_float (ebml, GST_MATROSKA_ID_LUMINANCEMIN, value);
 
   gst_ebml_write_master_finish (ebml, master);
@@ -2599,7 +2632,7 @@ gst_matroska_mux_write_colour (GstMatroskaMux * mux,
 
   matrix_id = gst_video_color_matrix_to_iso (videocontext->colorimetry.matrix);
   transfer_id =
-      gst_video_color_transfer_to_iso (videocontext->colorimetry.transfer);
+      gst_video_transfer_function_to_iso (videocontext->colorimetry.transfer);
   primaries_id =
       gst_video_color_primaries_to_iso (videocontext->colorimetry.primaries);
 
@@ -2609,16 +2642,12 @@ gst_matroska_mux_write_colour (GstMatroskaMux * mux,
   gst_ebml_write_uint (ebml, GST_MATROSKA_ID_VIDEOTRANSFERCHARACTERISTICS,
       transfer_id);
   gst_ebml_write_uint (ebml, GST_MATROSKA_ID_VIDEOPRIMARIES, primaries_id);
-  if (videocontext->content_light_level.maxCLL_n &&
-      videocontext->content_light_level.maxFALL_n) {
-    gdouble maxCLL = 0, maxFALL = 0;
-
-    gst_util_fraction_to_double (videocontext->content_light_level.maxCLL_n,
-        videocontext->content_light_level.maxCLL_d, &maxCLL);
-    gst_util_fraction_to_double (videocontext->content_light_level.maxFALL_n,
-        videocontext->content_light_level.maxFALL_d, &maxFALL);
-    gst_ebml_write_uint (ebml, GST_MATROSKA_ID_MAXCLL, (guint) maxCLL);
-    gst_ebml_write_uint (ebml, GST_MATROSKA_ID_MAXFALL, (guint) maxFALL);
+  if (videocontext->content_light_level.max_content_light_level &&
+      videocontext->content_light_level.max_frame_average_light_level) {
+    gst_ebml_write_uint (ebml, GST_MATROSKA_ID_MAXCLL,
+        videocontext->content_light_level.max_content_light_level);
+    gst_ebml_write_uint (ebml, GST_MATROSKA_ID_MAXFALL,
+        videocontext->content_light_level.max_frame_average_light_level);
   }
 
   gst_matroska_mux_write_mastering_metadata (mux, videocontext);
@@ -2780,6 +2809,8 @@ gst_matroska_mux_track_header (GstMatroskaMux * mux,
       /* doesn't need type-specific data */
       break;
   }
+
+  GST_DEBUG_OBJECT (mux, "Wrote track header. Codec %s", context->codec_id);
 
   gst_ebml_write_ascii (ebml, GST_MATROSKA_ID_CODECID, context->codec_id);
   if (context->codec_priv)
@@ -3798,6 +3829,7 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad,
   GstBuffer *hdr;
   guint64 blockgroup;
   gboolean write_duration;
+  guint64 cluster_time_scaled;
   gint16 relative_timestamp;
   gint64 relative_timestamp64;
   guint64 block_duration, duration_diff = 0;
@@ -3910,6 +3942,8 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad,
         gst_pad_push_event (mux->srcpad, mux->force_key_unit_event);
         mux->force_key_unit_event = NULL;
       }
+      cluster_time_scaled =
+          gst_util_uint64_scale (buffer_timestamp, 1, mux->time_scale);
 
       mux->prev_cluster_size = ebml->pos - mux->cluster_pos;
       mux->cluster_pos = ebml->pos;
@@ -3917,25 +3951,44 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad,
       mux->cluster =
           gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_CLUSTER);
       gst_ebml_write_uint (ebml, GST_MATROSKA_ID_CLUSTERTIMECODE,
-          gst_util_uint64_scale (buffer_timestamp, 1, mux->time_scale));
+          cluster_time_scaled);
       GST_LOG_OBJECT (mux, "cluster timestamp %" G_GUINT64_FORMAT,
           gst_util_uint64_scale (buffer_timestamp, 1, mux->time_scale));
       gst_ebml_write_flush_cache (ebml, is_video_keyframe
           || is_audio_only, buffer_timestamp);
-      mux->cluster_time = buffer_timestamp;
       gst_ebml_write_uint (ebml, GST_MATROSKA_ID_PREVSIZE,
           mux->prev_cluster_size);
+      /* cluster_time needs to be identical in value to what's stored in the
+       * matroska so we need to have it with the same precision as what's
+       * possible with the set timecodescale rather than just using the
+       * buffer_timestamp.
+       * If this is not done the rounding of relative_timestamp will be
+       * incorrect and possibly making the timestamps get out of order if tw
+       * buffers arrive at the same millisecond (assuming default timecodescale
+       * of 1ms) */
+      mux->cluster_time =
+          gst_util_uint64_scale (cluster_time_scaled, mux->time_scale, 1);
     }
   } else {
     /* first cluster */
-
+    cluster_time_scaled =
+        gst_util_uint64_scale (buffer_timestamp, 1, mux->time_scale);
     mux->cluster_pos = ebml->pos;
     gst_ebml_write_set_cache (ebml, 0x20);
     mux->cluster = gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_CLUSTER);
     gst_ebml_write_uint (ebml, GST_MATROSKA_ID_CLUSTERTIMECODE,
-        gst_util_uint64_scale (buffer_timestamp, 1, mux->time_scale));
+        cluster_time_scaled);
     gst_ebml_write_flush_cache (ebml, TRUE, buffer_timestamp);
-    mux->cluster_time = buffer_timestamp;
+    /* cluster_time needs to be identical in value to what's stored in the
+     * matroska so we need to have it with the same precision as what's
+     * possible with the set timecodescale rather than just using the
+     * buffer_timestamp.
+     * If this is not done the rounding of relative_timestamp will be
+     * incorrect and possibly making the timestamps get out of order if tw
+     * buffers arrive at the same millisecond (assuming default timecodescale
+     * of 1ms) */
+    mux->cluster_time =
+        gst_util_uint64_scale (cluster_time_scaled, mux->time_scale, 1);
   }
 
   /* We currently write index entries for all video tracks or for the audio

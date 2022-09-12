@@ -105,7 +105,7 @@ rtp_source_class_init (RTPSourceClass * klass)
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   /**
-   * RTPSource::sdes
+   * RTPSource:sdes
    *
    * The current SDES items of the source. Returns a structure with name
    * application/x-rtp-source-sdes and may contain the following fields:
@@ -127,7 +127,7 @@ rtp_source_class_init (RTPSourceClass * klass)
           GST_TYPE_STRUCTURE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   /**
-   * RTPSource::stats
+   * RTPSource:stats
    *
    * This property returns a GstStructure named application/x-rtp-source-stats with
    * fields useful for statistics and diagnostics.
@@ -144,77 +144,77 @@ rtp_source_class_init (RTPSourceClass * klass)
    *
    * The following fields are always present.
    *
-   *  "ssrc"         G_TYPE_UINT     the SSRC of this source
-   *  "internal"     G_TYPE_BOOLEAN  this source is a source of the session
-   *  "validated"    G_TYPE_BOOLEAN  the source is validated
-   *  "received-bye" G_TYPE_BOOLEAN  we received a BYE from this source
-   *  "is-csrc"      G_TYPE_BOOLEAN  this source was found as CSRC
-   *  "is-sender"    G_TYPE_BOOLEAN  this source is a sender
-   *  "seqnum-base"  G_TYPE_INT      first seqnum if known
-   *  "clock-rate"   G_TYPE_INT      the clock rate of the media
+   * * "ssrc"         G_TYPE_UINT     the SSRC of this source
+   * * "internal"     G_TYPE_BOOLEAN  this source is a source of the session
+   * * "validated"    G_TYPE_BOOLEAN  the source is validated
+   * * "received-bye" G_TYPE_BOOLEAN  we received a BYE from this source
+   * * "is-csrc"      G_TYPE_BOOLEAN  this source was found as CSRC
+   * * "is-sender"    G_TYPE_BOOLEAN  this source is a sender
+   * * "seqnum-base"  G_TYPE_INT      first seqnum if known
+   * * "clock-rate"   G_TYPE_INT      the clock rate of the media
    *
    * The following fields are only present when known.
    *
-   *  "rtp-from"     G_TYPE_STRING   where we received the last RTP packet from
-   *  "rtcp-from"    G_TYPE_STRING   where we received the last RTCP packet from
+   * * "rtp-from"     G_TYPE_STRING   where we received the last RTP packet from
+   * * "rtcp-from"    G_TYPE_STRING   where we received the last RTCP packet from
    *
    * The following fields make sense for internal sources and will only increase
    * when "is-sender" is TRUE.
    *
-   *  "octets-sent"  G_TYPE_UINT64   number of payload bytes we sent
-   *  "packets-sent" G_TYPE_UINT64   number of packets we sent
+   * * "octets-sent"  G_TYPE_UINT64   number of payload bytes we sent
+   * * "packets-sent" G_TYPE_UINT64   number of packets we sent
    *
    * The following fields make sense for non-internal sources and will only
    * increase when "is-sender" is TRUE.
    *
-   *  "octets-received"  G_TYPE_UINT64  total number of payload bytes received
-   *  "packets-received" G_TYPE_UINT64  total number of packets received
-   *  "bytes-received"   G_TYPE_UINT64  total number of bytes received including lower level headers overhead
+   * * "octets-received"  G_TYPE_UINT64  total number of payload bytes received
+   * * "packets-received" G_TYPE_UINT64  total number of packets received
+   * * "bytes-received"   G_TYPE_UINT64  total number of bytes received including lower level headers overhead
    *
    * Following fields are updated when "is-sender" is TRUE.
    *
-   *  "bitrate"      G_TYPE_UINT64   bitrate in bits per second
-   *  "jitter"       G_TYPE_UINT     estimated jitter (in clock rate units)
-   *  "packets-lost" G_TYPE_INT      estimated amount of packets lost
+   * * "bitrate"      G_TYPE_UINT64   bitrate in bits per second
+   * * "jitter"       G_TYPE_UINT     estimated jitter (in clock rate units)
+   * * "packets-lost" G_TYPE_INT      estimated amount of packets lost
    *
    * The last SR report this source sent. This only updates when "is-sender" is
    * TRUE.
    *
-   *  "have-sr"         G_TYPE_BOOLEAN  the source has sent SR
-   *  "sr-ntptime"      G_TYPE_UINT64   NTP time of SR (in NTP Timestamp Format, 32.32 fixed point)
-   *  "sr-rtptime"      G_TYPE_UINT     RTP time of SR (in clock rate units)
-   *  "sr-octet-count"  G_TYPE_UINT     the number of bytes in the SR
-   *  "sr-packet-count" G_TYPE_UINT     the number of packets in the SR
+   * * "have-sr"         G_TYPE_BOOLEAN  the source has sent SR
+   * * "sr-ntptime"      G_TYPE_UINT64   NTP time of SR (in NTP Timestamp Format, 32.32 fixed point)
+   * * "sr-rtptime"      G_TYPE_UINT     RTP time of SR (in clock rate units)
+   * * "sr-octet-count"  G_TYPE_UINT     the number of bytes in the SR
+   * * "sr-packet-count" G_TYPE_UINT     the number of packets in the SR
    *
    * The following fields are only present for non-internal sources and
    * represent the content of the last RB packet that was sent to this source.
    * These values are only updated when the source is sending.
    *
-   *  "sent-rb"               G_TYPE_BOOLEAN  we have sent an RB
-   *  "sent-rb-fractionlost"  G_TYPE_UINT     calculated lost 8-bit fraction
-   *  "sent-rb-packetslost"   G_TYPE_INT      lost packets
-   *  "sent-rb-exthighestseq" G_TYPE_UINT     last seen seqnum
-   *  "sent-rb-jitter"        G_TYPE_UINT     jitter (in clock rate units)
-   *  "sent-rb-lsr"           G_TYPE_UINT     last SR time (seconds in NTP Short Format, 16.16 fixed point)
-   *  "sent-rb-dlsr"          G_TYPE_UINT     delay since last SR (seconds in NTP Short Format, 16.16 fixed point)
+   * * "sent-rb"               G_TYPE_BOOLEAN  we have sent an RB
+   * * "sent-rb-fractionlost"  G_TYPE_UINT     calculated lost 8-bit fraction
+   * * "sent-rb-packetslost"   G_TYPE_INT      lost packets
+   * * "sent-rb-exthighestseq" G_TYPE_UINT     last seen seqnum
+   * * "sent-rb-jitter"        G_TYPE_UINT     jitter (in clock rate units)
+   * * "sent-rb-lsr"           G_TYPE_UINT     last SR time (seconds in NTP Short Format, 16.16 fixed point)
+   * * "sent-rb-dlsr"          G_TYPE_UINT     delay since last SR (seconds in NTP Short Format, 16.16 fixed point)
    *
    * The following fields are only present for non-internal sources and
    * represents the last RB that this source sent. This is only updated
    * when the source is receiving data and sending RB blocks.
    *
-   *  "have-rb"          G_TYPE_BOOLEAN  the source has sent RB
-   *  "rb-fractionlost"  G_TYPE_UINT     lost 8-bit fraction
-   *  "rb-packetslost"   G_TYPE_INT      lost packets
-   *  "rb-exthighestseq" G_TYPE_UINT     highest received seqnum
-   *  "rb-jitter"        G_TYPE_UINT     reception jitter (in clock rate units)
-   *  "rb-lsr"           G_TYPE_UINT     last SR time (seconds in NTP Short Format, 16.16 fixed point)
-   *  "rb-dlsr"          G_TYPE_UINT     delay since last SR (seconds in NTP Short Format, 16.16 fixed point)
+   * * "have-rb"          G_TYPE_BOOLEAN  the source has sent RB
+   * * "rb-fractionlost"  G_TYPE_UINT     lost 8-bit fraction
+   * * "rb-packetslost"   G_TYPE_INT      lost packets
+   * * "rb-exthighestseq" G_TYPE_UINT     highest received seqnum
+   * * "rb-jitter"        G_TYPE_UINT     reception jitter (in clock rate units)
+   * * "rb-lsr"           G_TYPE_UINT     last SR time (seconds in NTP Short Format, 16.16 fixed point)
+   * * "rb-dlsr"          G_TYPE_UINT     delay since last SR (seconds in NTP Short Format, 16.16 fixed point)
    *
    * The round trip of this source is calculated from the last RB
    * values and the reception time of the last RB packet. It is only present for
    * non-internal sources.
    *
-   *  "rb-round-trip"    G_TYPE_UINT     the round-trip time (seconds in NTP Short Format, 16.16 fixed point)
+   * * "rb-round-trip"    G_TYPE_UINT     the round-trip time (seconds in NTP Short Format, 16.16 fixed point)
    *
    */
   g_object_class_install_property (gobject_class, PROP_STATS,
@@ -241,7 +241,7 @@ rtp_source_class_init (RTPSourceClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   /**
-   * RTPSession::disable-rtcp:
+   * RTPSource:disable-rtcp:
    *
    * Allow disabling the sending of RTCP packets for this source.
    */
@@ -426,7 +426,9 @@ rtp_source_create_stats (RTPSource * src)
       "sent-fir-count", G_TYPE_UINT, src->stats.sent_fir_count,
       "recv-fir-count", G_TYPE_UINT, src->stats.recv_fir_count,
       "sent-nack-count", G_TYPE_UINT, src->stats.sent_nack_count,
-      "recv-nack-count", G_TYPE_UINT, src->stats.recv_nack_count, NULL);
+      "recv-nack-count", G_TYPE_UINT, src->stats.recv_nack_count,
+      "recv-packet-rate", G_TYPE_UINT,
+      gst_rtp_packet_rate_ctx_get (&src->packet_rate_ctx), NULL);
 
   /* get the last SR. */
   have_sr = rtp_source_get_last_sr (src, &time, &ntptime, &rtptime,
@@ -918,8 +920,8 @@ push_packet (RTPSource * src, GstBuffer * buffer)
   return ret;
 }
 
-static gint
-get_clock_rate (RTPSource * src, guint8 payload)
+static void
+fetch_clock_rate_from_payload (RTPSource * src, guint8 payload)
 {
   if (src->payload == -1) {
     /* first payload received, nothing was in the caps, lock on to this payload */
@@ -944,7 +946,6 @@ get_clock_rate (RTPSource * src, guint8 payload)
     src->clock_rate = clock_rate;
     gst_rtp_packet_rate_ctx_reset (&src->packet_rate_ctx, clock_rate);
   }
-  return src->clock_rate;
 }
 
 /* Jitter is the variation in the delay of received packets in a flow. It is
@@ -958,26 +959,23 @@ calculate_jitter (RTPSource * src, RTPPacketInfo * pinfo)
   GstClockTime running_time;
   guint32 rtparrival, transit, rtptime;
   gint32 diff;
-  gint clock_rate;
-  guint8 pt;
 
   /* get arrival time */
   if ((running_time = pinfo->running_time) == GST_CLOCK_TIME_NONE)
     goto no_time;
 
-  pt = pinfo->pt;
+  GST_LOG ("SSRC %08x got payload %d", src->ssrc, pinfo->pt);
 
-  GST_LOG ("SSRC %08x got payload %d", src->ssrc, pt);
-
-  /* get clockrate */
-  if ((clock_rate = get_clock_rate (src, pt)) == -1)
+  /* check if clock-rate is valid */
+  if (src->clock_rate == -1)
     goto no_clock_rate;
 
   rtptime = pinfo->rtptime;
 
   /* convert arrival time to RTP timestamp units, truncate to 32 bits, we don't
    * care about the absolute value, just the difference. */
-  rtparrival = gst_util_uint64_scale_int (running_time, clock_rate, GST_SECOND);
+  rtparrival =
+      gst_util_uint64_scale_int (running_time, src->clock_rate, GST_SECOND);
 
   /* transit time is difference with RTP timestamp */
   transit = rtparrival - rtptime;
@@ -1000,7 +998,7 @@ calculate_jitter (RTPSource * src, RTPPacketInfo * pinfo)
   src->stats.last_rtptime = rtparrival;
 
   GST_LOG ("rtparrival %u, rtptime %u, clock-rate %d, diff %d, jitter: %f",
-      rtparrival, rtptime, clock_rate, diff, (src->stats.jitter) / 16.0);
+      rtparrival, rtptime, src->clock_rate, diff, (src->stats.jitter) / 16.0);
 
   return;
 
@@ -1012,7 +1010,7 @@ no_time:
   }
 no_clock_rate:
   {
-    GST_WARNING ("cannot get clock-rate for pt %d", pt);
+    GST_WARNING ("cannot get clock-rate for pt %d", pinfo->pt);
     return;
   }
 }
@@ -1262,6 +1260,8 @@ rtp_source_process_rtp (RTPSource * src, RTPPacketInfo * pinfo)
 
   g_return_val_if_fail (RTP_IS_SOURCE (src), GST_FLOW_ERROR);
   g_return_val_if_fail (pinfo != NULL, GST_FLOW_ERROR);
+
+  fetch_clock_rate_from_payload (src, pinfo->pt);
 
   if (!update_receiver_stats (src, pinfo, TRUE))
     return GST_FLOW_OK;
@@ -1551,7 +1551,7 @@ rtp_source_get_new_sr (RTPSource * src, guint64 ntpnstime,
   if (src->clock_rate == -1 && src->pt_set) {
     GST_INFO ("no clock-rate, getting for pt %u and SSRC %u", src->pt,
         src->ssrc);
-    get_clock_rate (src, src->pt);
+    fetch_clock_rate_from_payload (src, src->pt);
   }
 
   if (src->clock_rate != -1) {

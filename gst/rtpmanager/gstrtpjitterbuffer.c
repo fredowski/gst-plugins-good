@@ -234,6 +234,8 @@ enum
 } G_STMT_END
 
 #define JBUF_WAIT_EVENT(priv,label) G_STMT_START {       \
+  if (G_UNLIKELY (priv->srcresult != GST_FLOW_OK))       \
+    goto label;                                          \
   GST_DEBUG ("waiting event");                           \
   (priv)->waiting_event = TRUE;                          \
   g_cond_wait (&(priv)->jbuf_event, &(priv)->jbuf_lock); \
@@ -250,6 +252,8 @@ enum
 } G_STMT_END
 
 #define JBUF_WAIT_QUERY(priv,label) G_STMT_START {       \
+  if (G_UNLIKELY (priv->srcresult != GST_FLOW_OK))       \
+    goto label;                                          \
   GST_DEBUG ("waiting query");                           \
   (priv)->waiting_query = TRUE;                          \
   g_cond_wait (&(priv)->jbuf_query, &(priv)->jbuf_lock); \
@@ -269,6 +273,18 @@ enum
 #define GST_BUFFER_IS_RETRANSMISSION(buffer) \
   GST_BUFFER_FLAG_IS_SET (buffer, GST_RTP_BUFFER_FLAG_RETRANSMISSION)
 
+#if !GLIB_CHECK_VERSION(2, 60, 0)
+#define g_queue_clear_full queue_clear_full
+static void
+queue_clear_full (GQueue * queue, GDestroyNotify free_func)
+{
+  gpointer data;
+
+  while ((data = g_queue_pop_head (queue)) != NULL)
+    free_func (data);
+}
+#endif
+
 struct _GstRtpJitterBufferPrivate
 {
   GstPad *sinkpad, *srcpad;
@@ -276,9 +292,9 @@ struct _GstRtpJitterBufferPrivate
 
   RTPJitterBuffer *jbuf;
   GMutex jbuf_lock;
-  gboolean waiting_queue;
+  guint waiting_queue;
   GCond jbuf_queue;
-  gboolean waiting_timer;
+  guint waiting_timer;
   GCond jbuf_timer;
   gboolean waiting_event;
   GCond jbuf_event;
@@ -399,13 +415,11 @@ struct _GstRtpJitterBufferPrivate
   GstClockTime last_drop_msg_timestamp;
   /* accumulators; reset every time a drop message is posted */
   guint num_too_late;
-  guint num_already_lost;
   guint num_drop_on_latency;
 };
 typedef enum
 {
   REASON_TOO_LATE,
-  REASON_ALREADY_LOST,
   REASON_DROP_ON_LATENCY
 } DropMessageReason;
 
@@ -594,11 +608,9 @@ gst_rtp_jitter_buffer_class_init (GstRtpJitterBufferClass * klass)
    *
    * * #guint   `seqnum`: Seqnum of dropped packet.
    * * #guint64 `timestamp`: PTS timestamp of dropped packet.
-   * * #gstring `reason`: Reason for dropping the packet.
+   * * #GString `reason`: Reason for dropping the packet.
    * * #guint   `num-too-late`: Number of packets arriving too late since
    *    last drop message.
-   * * #guint   `num-already-lost`: Number of packets already considered lost
-   *    since drop message.
    * * #guint   `num-drop-on-latency`: Number of packets dropped due to the
    *    drop-on-latency property since last drop message.
    *
@@ -723,7 +735,7 @@ gst_rtp_jitter_buffer_class_init (GstRtpJitterBufferClass * klass)
           -1, G_MAXINT, DEFAULT_RTX_DELAY_REORDER,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   /**
-   * GstRtpJitterBuffer::rtx-retry-timeout:
+   * GstRtpJitterBuffer:rtx-retry-timeout:
    *
    * When no packet has been received after sending a retransmission event
    * for this time, retry sending a retransmission event.
@@ -739,7 +751,7 @@ gst_rtp_jitter_buffer_class_init (GstRtpJitterBufferClass * klass)
           "ms (-1 automatic)", -1, G_MAXINT, DEFAULT_RTX_RETRY_TIMEOUT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   /**
-   * GstRtpJitterBuffer::rtx-min-retry-timeout:
+   * GstRtpJitterBuffer:rtx-min-retry-timeout:
    *
    * The minimum amount of time between retry timeouts. When
    * GstRtpJitterBuffer::rtx-retry-timeout is -1, this value ensures a
@@ -801,7 +813,7 @@ gst_rtp_jitter_buffer_class_init (GstRtpJitterBufferClass * klass)
           "(-1 automatic)", -1, G_MAXINT, DEFAULT_RTX_DEADLINE,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 /**
-   * GstRtpJitterBuffer::rtx-stats-timeout:
+   * GstRtpJitterBuffer:rtx-stats-timeout:
    *
    * The time to wait for a retransmitted packet after it has been
    * considered lost in order to collect RTX statistics.
@@ -836,6 +848,7 @@ gst_rtp_jitter_buffer_class_init (GstRtpJitterBufferClass * klass)
    * * #guint64 `num-lost`: the number of packets considered lost.
    * * #guint64 `num-late`: the number of packets arriving too late.
    * * #guint64 `num-duplicates`: the number of duplicate packets.
+   * * #guint64 `avg-jitter`: the average jitter in nanoseconds.
    * * #guint64 `rtx-count`: the number of retransmissions requested.
    * * #guint64 `rtx-success-count`: the number of successful retransmissions.
    * * #gdouble `rtx-per-packet`: average number of RTX per packet.
@@ -981,6 +994,8 @@ gst_rtp_jitter_buffer_class_init (GstRtpJitterBufferClass * klass)
   GST_DEBUG_CATEGORY_INIT
       (rtpjitterbuffer_debug, "rtpjitterbuffer", 0, "RTP Jitter Buffer");
   GST_DEBUG_REGISTER_FUNCPTR (gst_rtp_jitter_buffer_chain_rtcp);
+
+  gst_type_mark_as_plugin_api (RTP_TYPE_JITTER_BUFFER_MODE, 0);
 }
 
 static void
@@ -1022,7 +1037,6 @@ gst_rtp_jitter_buffer_init (GstRtpJitterBuffer * jitterbuffer)
   priv->avg_jitter = 0;
   priv->last_drop_msg_timestamp = GST_CLOCK_TIME_NONE;
   priv->num_too_late = 0;
-  priv->num_already_lost = 0;
   priv->num_drop_on_latency = 0;
   priv->segment_seqnum = GST_SEQNUM_INVALID;
   priv->timers = rtp_timer_queue_new ();
@@ -1070,20 +1084,6 @@ gst_rtp_jitter_buffer_init (GstRtpJitterBuffer * jitterbuffer)
   gst_element_add_pad (GST_ELEMENT (jitterbuffer), priv->sinkpad);
 
   GST_OBJECT_FLAG_SET (jitterbuffer, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
-}
-
-#define IS_DROPABLE(it) (((it)->type == ITEM_TYPE_BUFFER) || ((it)->type == ITEM_TYPE_LOST))
-
-#define ITEM_TYPE_BUFFER        0
-#define ITEM_TYPE_LOST          1
-#define ITEM_TYPE_EVENT         2
-#define ITEM_TYPE_QUERY         3
-
-static inline RTPJitterBufferItem *
-alloc_event_item (GstEvent * event)
-{
-  return rtp_jitter_buffer_alloc_item (event, ITEM_TYPE_EVENT, -1, -1, -1, 0,
-      -1, (GDestroyNotify) gst_mini_object_unref);
 }
 
 static void
@@ -1372,6 +1372,24 @@ gst_rtp_jitter_buffer_getcaps (GstPad * pad, GstCaps * filter)
   return caps;
 }
 
+/* g_ascii_string_to_unsigned is available since 2.54. Get rid of this wrapper
+ * when we bump the version in 1.18 */
+#if !GLIB_CHECK_VERSION(2,54,0)
+#define g_ascii_string_to_unsigned _gst_jitter_buffer_ascii_string_to_unsigned
+static gboolean
+_gst_jitter_buffer_ascii_string_to_unsigned (const gchar * str, guint base,
+    guint64 min, guint64 max, guint64 * out_num, GError ** error)
+{
+  gchar *endptr = NULL;
+  *out_num = g_ascii_strtoull (str, &endptr, base);
+  if (errno)
+    return FALSE;
+  if (endptr == str)
+    return FALSE;
+  return TRUE;
+}
+#endif
+
 /*
  * Must be called with JBUF_LOCK held
  */
@@ -1519,8 +1537,9 @@ gst_jitter_buffer_sink_parse_caps (GstRtpJitterBuffer * jitterbuffer,
     if ((mediaclk = gst_structure_get_string (caps_struct, "a-mediaclk"))) {
       GST_DEBUG_OBJECT (jitterbuffer, "Got media clock %s", mediaclk);
 
-      if (!g_str_has_prefix (mediaclk, "direct=")
-          || sscanf (mediaclk, "direct=%" G_GUINT64_FORMAT, &clock_offset) != 1)
+      if (!g_str_has_prefix (mediaclk, "direct=") ||
+          !g_ascii_string_to_unsigned (&mediaclk[7], 10, 0, G_MAXUINT64,
+              &clock_offset, NULL))
         GST_FIXME_OBJECT (jitterbuffer, "Unsupported media clock");
       if (strstr (mediaclk, "rate=") != NULL) {
         GST_FIXME_OBJECT (jitterbuffer, "Rate property not supported");
@@ -1600,7 +1619,6 @@ gst_rtp_jitter_buffer_flush_stop (GstRtpJitterBuffer * jitterbuffer)
   priv->segment_seqnum = GST_SEQNUM_INVALID;
   priv->last_drop_msg_timestamp = GST_CLOCK_TIME_NONE;
   priv->num_too_late = 0;
-  priv->num_already_lost = 0;
   priv->num_drop_on_latency = 0;
   GST_DEBUG_OBJECT (jitterbuffer, "flush and reset jitterbuffer");
   rtp_jitter_buffer_flush (priv->jbuf, NULL, NULL);
@@ -1779,7 +1797,6 @@ static gboolean
 queue_event (GstRtpJitterBuffer * jitterbuffer, GstEvent * event)
 {
   GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
-  RTPJitterBufferItem *item;
   gboolean head;
 
   switch (GST_EVENT_TYPE (event)) {
@@ -1819,10 +1836,8 @@ queue_event (GstRtpJitterBuffer * jitterbuffer, GstEvent * event)
       break;
   }
 
-
   GST_DEBUG_OBJECT (jitterbuffer, "adding event");
-  item = alloc_event_item (event);
-  rtp_jitter_buffer_insert (priv->jbuf, item, &head, NULL);
+  head = rtp_jitter_buffer_append_event (priv->jbuf, event);
   if (head || priv->eos)
     JBUF_SIGNAL_EVENT (priv);
 
@@ -2028,9 +2043,6 @@ new_drop_message (GstRtpJitterBuffer * jitterbuffer, guint seqnum,
   if (reason == REASON_TOO_LATE) {
     priv->num_too_late++;
     reason_str = "too-late";
-  } else if (reason == REASON_ALREADY_LOST) {
-    priv->num_already_lost++;
-    reason_str = "already-lost";
   } else if (reason == REASON_DROP_ON_LATENCY) {
     priv->num_drop_on_latency++;
     reason_str = "drop-on-latency";
@@ -2049,12 +2061,10 @@ new_drop_message (GstRtpJitterBuffer * jitterbuffer, guint seqnum,
         "timestamp", GST_TYPE_CLOCK_TIME, timestamp,
         "reason", G_TYPE_STRING, reason_str,
         "num-too-late", G_TYPE_UINT, priv->num_too_late,
-        "num-already-lost", G_TYPE_UINT, priv->num_already_lost,
         "num-drop-on-latency", G_TYPE_UINT, priv->num_drop_on_latency, NULL);
 
     priv->last_drop_msg_timestamp = current_time;
     priv->num_too_late = 0;
-    priv->num_already_lost = 0;
     priv->num_drop_on_latency = 0;
     drop_msg = gst_message_new_element (GST_OBJECT (jitterbuffer), s);
   }
@@ -2078,6 +2088,27 @@ get_pts_timeout (const RtpTimer * timer)
   return timer->timeout - timer->offset;
 }
 
+static inline gboolean
+safe_add (guint64 * res, guint64 val, gint64 offset)
+{
+  if (val <= G_MAXINT64) {
+    gint64 tmp = (gint64) val + offset;
+    if (tmp >= 0) {
+      *res = tmp;
+      return TRUE;
+    }
+    return FALSE;
+  }
+  /* From here, val > G_MAXINT64 */
+
+  /* Negative value */
+  if (offset < 0 && val < -offset)
+    return FALSE;
+
+  *res = val + offset;
+  return TRUE;
+}
+
 static void
 update_timer_offsets (GstRtpJitterBuffer * jitterbuffer)
 {
@@ -2087,8 +2118,15 @@ update_timer_offsets (GstRtpJitterBuffer * jitterbuffer)
 
   while (test) {
     if (test->type != RTP_TIMER_EXPECTED) {
-      test->timeout = get_pts_timeout (test) + new_offset;
-      test->offset = new_offset;
+      GstClockTime pts = get_pts_timeout (test);
+      if (safe_add (&test->timeout, pts, new_offset)) {
+        test->offset = new_offset;
+      } else {
+        GST_DEBUG_OBJECT (jitterbuffer,
+            "Invalidating timeout (pts lower than new offset)");
+        test->timeout = GST_CLOCK_TIME_NONE;
+        test->offset = 0;
+      }
       /* as we apply the offset on all timers, the order of timers won't
        * change and we can skip updating the timer queue */
     }
@@ -2136,7 +2174,8 @@ apply_offset (GstRtpJitterBuffer * jitterbuffer, GstClockTime timestamp)
     return -1;
 
   /* apply the timestamp offset, this is used for inter stream sync */
-  timestamp += priv->ts_offset;
+  if (!safe_add (&timestamp, timestamp, priv->ts_offset))
+    timestamp = 0;
   /* add the offset, this is used when buffering */
   timestamp += priv->out_offset;
 
@@ -2218,33 +2257,6 @@ get_rtx_delay (GstRtpJitterBufferPrivate * priv)
     delay = MAX (delay, priv->rtx_min_delay * GST_MSECOND);
 
   return delay;
-}
-
-/* Check if packet with seqnum is already considered definitely lost by being
- * part of a "lost timer" for multiple packets */
-static gboolean
-already_lost (GstRtpJitterBuffer * jitterbuffer, GstClockTime pts,
-    guint16 seqnum)
-{
-  GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
-  RtpTimer *test;
-
-  test = rtp_timer_queue_peek_earliest (priv->timers);
-  while (test && get_pts_timeout (test) <= pts) {
-    gint gap = gst_rtp_buffer_compare_seqnum (test->seqnum, seqnum);
-
-    if (test->num > 1 && test->type == RTP_TIMER_LOST && gap >= 0 &&
-        gap < test->num) {
-      GST_DEBUG_OBJECT (jitterbuffer,
-          "seqnum #%d already considered definitely lost (#%d->#%d)",
-          seqnum, test->seqnum, (test->seqnum + test->num - 1) & 0xffff);
-      return TRUE;
-    }
-
-    test = rtp_timer_get_next (test);
-  }
-
-  return FALSE;
 }
 
 /* we just received a packet with seqnum and dts.
@@ -2401,16 +2413,63 @@ calculate_packet_spacing (GstRtpJitterBuffer * jitterbuffer, guint32 rtptime,
 }
 
 static void
+insert_lost_event (GstRtpJitterBuffer * jitterbuffer,
+    guint16 seqnum, guint lost_packets, GstClockTime timestamp,
+    GstClockTime duration, guint num_rtx_retry)
+{
+  GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
+  GstEvent *event = NULL;
+  guint next_in_seqnum;
+
+  /* we had a gap and thus we lost some packets. Create an event for this.  */
+  if (lost_packets > 1)
+    GST_DEBUG_OBJECT (jitterbuffer, "Packets #%d -> #%d lost", seqnum,
+        seqnum + lost_packets - 1);
+  else
+    GST_DEBUG_OBJECT (jitterbuffer, "Packet #%d lost", seqnum);
+
+  priv->num_lost += lost_packets;
+  priv->num_rtx_failed += num_rtx_retry;
+
+  next_in_seqnum = (seqnum + lost_packets) & 0xffff;
+
+  /* we now only accept seqnum bigger than this */
+  if (gst_rtp_buffer_compare_seqnum (priv->next_in_seqnum, next_in_seqnum) > 0) {
+    priv->next_in_seqnum = next_in_seqnum;
+    priv->last_in_pts = timestamp;
+  }
+
+  /* Avoid creating events if we don't need it. Note that we still need to create
+   * the lost *ITEM* since it will be used to notify the outgoing thread of
+   * lost items (so that we can set discont flags and such) */
+  if (priv->do_lost) {
+    /* create packet lost event */
+    if (duration == GST_CLOCK_TIME_NONE && priv->packet_spacing > 0)
+      duration = priv->packet_spacing;
+    event = gst_event_new_custom (GST_EVENT_CUSTOM_DOWNSTREAM,
+        gst_structure_new ("GstRTPPacketLost",
+            "seqnum", G_TYPE_UINT, (guint) seqnum,
+            "timestamp", G_TYPE_UINT64, timestamp,
+            "duration", G_TYPE_UINT64, duration,
+            "retry", G_TYPE_UINT, num_rtx_retry, NULL));
+  }
+  if (rtp_jitter_buffer_append_lost_event (priv->jbuf,
+          event, seqnum, lost_packets))
+    JBUF_SIGNAL_EVENT (priv);
+}
+
+static void
 calculate_expected (GstRtpJitterBuffer * jitterbuffer, guint32 expected,
     guint16 seqnum, GstClockTime pts, gint gap)
 {
   GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
   GstClockTime duration, expected_pts;
   gboolean equidistant = priv->equidistant > 0;
+  GstClockTime last_in_pts = priv->last_in_pts;
 
   GST_DEBUG_OBJECT (jitterbuffer,
       "pts %" GST_TIME_FORMAT ", last %" GST_TIME_FORMAT,
-      GST_TIME_ARGS (pts), GST_TIME_ARGS (priv->last_in_pts));
+      GST_TIME_ARGS (pts), GST_TIME_ARGS (last_in_pts));
 
   if (pts == GST_CLOCK_TIME_NONE) {
     GST_WARNING_OBJECT (jitterbuffer, "Have no PTS");
@@ -2420,8 +2479,8 @@ calculate_expected (GstRtpJitterBuffer * jitterbuffer, guint32 expected,
   if (equidistant) {
     GstClockTime total_duration;
     /* the total duration spanned by the missing packets */
-    if (pts >= priv->last_in_pts)
-      total_duration = pts - priv->last_in_pts;
+    if (pts >= last_in_pts)
+      total_duration = pts - last_in_pts;
     else
       total_duration = 0;
 
@@ -2458,18 +2517,30 @@ calculate_expected (GstRtpJitterBuffer * jitterbuffer, guint32 expected,
           GST_TIME_ARGS (priv->latency_ns), lost_packets,
           GST_TIME_ARGS (gap_time));
 
-      /* this timer will fire immediately and the lost event will be pushed from
-       * the timer thread */
+      /* this multi-lost-packet event will be inserted directly into the packet-queue
+         for immediate processing */
       if (lost_packets > 0) {
-        rtp_timer_queue_set_lost (priv->timers, expected, lost_packets,
-            priv->last_in_pts + duration, gap_time,
-            timeout_offset (jitterbuffer));
+        RtpTimer *timer;
+        GstClockTime timestamp =
+            apply_offset (jitterbuffer, last_in_pts + duration);
+        insert_lost_event (jitterbuffer, expected, lost_packets, timestamp,
+            gap_time, 0);
+
+        timer = rtp_timer_queue_find (priv->timers, expected);
+        if (timer && timer->type == RTP_TIMER_EXPECTED) {
+          if (timer->queued)
+            rtp_timer_queue_unschedule (priv->timers, timer);
+          GST_DEBUG_OBJECT (jitterbuffer, "removing timer for seqnum #%u",
+              expected);
+          rtp_timer_free (timer);
+        }
+
         expected += lost_packets;
-        priv->last_in_pts += gap_time;
+        last_in_pts += gap_time;
       }
     }
 
-    expected_pts = priv->last_in_pts + duration;
+    expected_pts = last_in_pts + duration;
   } else {
     /* If we cannot assume equidistant packet spacing, the only thing we now
      * for sure is that the missing packets have expected pts not later than
@@ -2507,7 +2578,7 @@ calculate_expected (GstRtpJitterBuffer * jitterbuffer, guint32 expected,
     }
   } else {
     while (gst_rtp_buffer_compare_seqnum (expected, seqnum) > 0) {
-      rtp_timer_queue_set_lost (priv->timers, expected, 0, expected_pts,
+      rtp_timer_queue_set_lost (priv->timers, expected, expected_pts,
           duration, timeout_offset (jitterbuffer));
       expected_pts += duration;
       expected++;
@@ -2700,7 +2771,6 @@ gst_rtp_jitter_buffer_reset (GstRtpJitterBuffer * jitterbuffer,
   GstFlowReturn ret = GST_FLOW_OK;
   GList *events = NULL, *l;
   GList *buffers;
-  gboolean head;
 
   GST_DEBUG_OBJECT (jitterbuffer, "flush and reset jitterbuffer");
   rtp_jitter_buffer_flush (priv->jbuf,
@@ -2729,10 +2799,7 @@ gst_rtp_jitter_buffer_reset (GstRtpJitterBuffer * jitterbuffer,
    */
   events = g_list_reverse (events);
   for (l = events; l; l = l->next) {
-    RTPJitterBufferItem *item;
-
-    item = alloc_event_item (l->data);
-    rtp_jitter_buffer_insert (priv->jbuf, item, &head, NULL);
+    rtp_jitter_buffer_append_event (priv->jbuf, l->data);
   }
   g_list_free (events);
 
@@ -2808,16 +2875,17 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
   GstClockTime dts, pts;
   guint64 latency_ts;
   gboolean head;
+  gboolean duplicate;
   gint percent = -1;
   guint8 pt;
   GstRTPBuffer rtp = GST_RTP_BUFFER_INIT;
   gboolean do_next_seqnum = FALSE;
-  RTPJitterBufferItem *item;
   GstMessage *msg = NULL;
   GstMessage *drop_msg = NULL;
   gboolean estimated_dts = FALSE;
   gint32 packet_rate, max_dropout, max_misorder;
   RtpTimer *timer = NULL;
+  gboolean is_rtx;
 
   jitterbuffer = GST_RTP_JITTER_BUFFER_CAST (parent);
 
@@ -2830,6 +2898,8 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
   seqnum = gst_rtp_buffer_get_seq (&rtp);
   rtptime = gst_rtp_buffer_get_timestamp (&rtp);
   gst_rtp_buffer_unmap (&rtp);
+
+  is_rtx = GST_BUFFER_IS_RETRANSMISSION (buffer);
 
   /* make sure we have PTS and DTS set */
   pts = GST_BUFFER_PTS (buffer);
@@ -2862,8 +2932,7 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
 
   GST_DEBUG_OBJECT (jitterbuffer,
       "Received packet #%d at time %" GST_TIME_FORMAT ", discont %d, rtx %d",
-      seqnum, GST_TIME_ARGS (dts), GST_BUFFER_IS_DISCONT (buffer),
-      GST_BUFFER_IS_RETRANSMISSION (buffer));
+      seqnum, GST_TIME_ARGS (dts), GST_BUFFER_IS_DISCONT (buffer), is_rtx);
 
   JBUF_LOCK_CHECK (priv, out_flushing);
 
@@ -2901,7 +2970,7 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
   if (G_UNLIKELY (priv->eos))
     goto have_eos;
 
-  if (!GST_BUFFER_IS_RETRANSMISSION (buffer))
+  if (!is_rtx)
     calculate_jitter (jitterbuffer, dts, rtptime);
 
   if (priv->seqnum_base != -1) {
@@ -2925,20 +2994,23 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
 
   expected = priv->next_in_seqnum;
 
-  packet_rate =
-      gst_rtp_packet_rate_ctx_update (&priv->packet_rate_ctx, seqnum, rtptime);
+  /* don't update packet-rate based on RTX, as those arrive highly unregularly */
+  if (!is_rtx) {
+    packet_rate = gst_rtp_packet_rate_ctx_update (&priv->packet_rate_ctx,
+        seqnum, rtptime);
+    GST_TRACE_OBJECT (jitterbuffer, "updated packet_rate: %d", packet_rate);
+  }
   max_dropout =
       gst_rtp_packet_rate_ctx_get_max_dropout (&priv->packet_rate_ctx,
       priv->max_dropout_time);
   max_misorder =
       gst_rtp_packet_rate_ctx_get_max_misorder (&priv->packet_rate_ctx,
       priv->max_misorder_time);
-  GST_TRACE_OBJECT (jitterbuffer,
-      "packet_rate: %d, max_dropout: %d, max_misorder: %d", packet_rate,
+  GST_TRACE_OBJECT (jitterbuffer, "max_dropout: %d, max_misorder: %d",
       max_dropout, max_misorder);
 
   timer = rtp_timer_queue_find (priv->timers, seqnum);
-  if (GST_BUFFER_IS_RETRANSMISSION (buffer)) {
+  if (is_rtx) {
     if (G_UNLIKELY (!priv->do_retransmission))
       goto unsolicited_rtx;
 
@@ -2994,12 +3066,13 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
        * next packet */
       GST_WARNING_OBJECT (jitterbuffer, "%d pending timers > %d - resetting",
           rtp_timer_queue_length (priv->timers), max_dropout);
-      gst_buffer_unref (buffer);
+      g_queue_insert_sorted (&priv->gap_packets, buffer,
+          (GCompareDataFunc) compare_buffer_seqnum, NULL);
       return gst_rtp_jitter_buffer_reset (jitterbuffer, pad, parent, seqnum);
     }
 
     /* Special handling of large gaps */
-    if ((gap != -1 && gap < -max_misorder) || (gap >= max_dropout)) {
+    if (!is_rtx && ((gap != -1 && gap < -max_misorder) || (gap >= max_dropout))) {
       gboolean reset = handle_big_gap_buffer (jitterbuffer, buffer, pt, seqnum,
           gap, max_dropout, max_misorder);
       if (reset) {
@@ -3021,7 +3094,7 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
     pts =
         rtp_jitter_buffer_calculate_pts (priv->jbuf, dts, estimated_dts,
         rtptime, gst_element_get_base_time (GST_ELEMENT_CAST (jitterbuffer)),
-        gap, GST_BUFFER_IS_RETRANSMISSION (buffer));
+        gap, is_rtx);
 
     if (G_UNLIKELY (!GST_CLOCK_TIME_IS_VALID (pts))) {
       /* A valid timestamp cannot be calculated, discard packet */
@@ -3056,7 +3129,7 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
     priv->next_in_seqnum = (seqnum + 1) & 0xffff;
   }
 
-  if (GST_BUFFER_IS_RETRANSMISSION (buffer))
+  if (is_rtx)
     timer->num_rtx_received++;
 
   /* At 2^15, we would detect a seqnum rollover too early, therefore
@@ -3089,7 +3162,7 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
     /* priv->last_popped_seqnum >= seqnum, we're too late. */
     if (G_UNLIKELY (gap <= 0)) {
       if (priv->do_retransmission) {
-        if (GST_BUFFER_IS_RETRANSMISSION (buffer) && timer) {
+        if (is_rtx && timer) {
           update_rtx_stats (jitterbuffer, timer, dts, FALSE);
           /* Only count the retranmitted packet too late if it has been
            * considered lost. If the original packet arrived before the
@@ -3101,9 +3174,6 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
       goto too_late;
     }
   }
-
-  if (already_lost (jitterbuffer, pts, seqnum))
-    goto already_lost;
 
   /* let's drop oldest packet if the queue is already full and drop-on-latency
    * is set. We can only do this when there actually is a latency. When no
@@ -3140,20 +3210,15 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
    * later. The code above always sets dts to pts or the other way around if
    * any of those is valid in the buffer, so we know that if we estimated the
    * dts that both are unknown */
-  if (estimated_dts)
-    item = rtp_jitter_buffer_alloc_item (buffer, ITEM_TYPE_BUFFER,
-        GST_CLOCK_TIME_NONE, pts, seqnum, 1, rtptime,
-        (GDestroyNotify) gst_mini_object_unref);
-  else
-    item = rtp_jitter_buffer_alloc_item (buffer, ITEM_TYPE_BUFFER, dts, pts,
-        seqnum, 1, rtptime, (GDestroyNotify) gst_mini_object_unref);
+  head = rtp_jitter_buffer_append_buffer (priv->jbuf, buffer,
+      estimated_dts ? GST_CLOCK_TIME_NONE : dts, pts, seqnum, rtptime,
+      &duplicate, &percent);
 
   /* now insert the packet into the queue in sorted order. This function returns
    * FALSE if a packet with the same seqnum was already in the queue, meaning we
    * have a duplicate. */
-  if (G_UNLIKELY (!rtp_jitter_buffer_insert (priv->jbuf, item, &head,
-              &percent))) {
-    if (GST_BUFFER_IS_RETRANSMISSION (buffer) && timer)
+  if (G_UNLIKELY (duplicate)) {
+    if (is_rtx && timer)
       update_rtx_stats (jitterbuffer, timer, dts, FALSE);
     goto duplicate;
   }
@@ -3163,8 +3228,7 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
     head = TRUE;
 
   /* update timers */
-  update_timers (jitterbuffer, seqnum, dts, pts, do_next_seqnum,
-      GST_BUFFER_IS_RETRANSMISSION (buffer), timer);
+  update_timers (jitterbuffer, seqnum, dts, pts, do_next_seqnum, is_rtx, timer);
 
   /* we had an unhandled SR, handle it now */
   if (priv->last_sr)
@@ -3234,24 +3298,11 @@ too_late:
     gst_buffer_unref (buffer);
     goto finished;
   }
-already_lost:
-  {
-    GST_DEBUG_OBJECT (jitterbuffer, "Packet #%d too late as it was already "
-        "considered lost", seqnum);
-    priv->num_late++;
-    if (priv->post_drop_messages) {
-      drop_msg =
-          new_drop_message (jitterbuffer, seqnum, pts, REASON_ALREADY_LOST);
-    }
-    gst_buffer_unref (buffer);
-    goto finished;
-  }
 duplicate:
   {
     GST_DEBUG_OBJECT (jitterbuffer, "Duplicate packet #%d detected, dropping",
         seqnum);
     priv->num_duplicates++;
-    rtp_jitter_buffer_free_item (item);
     goto finished;
   }
 rtx_duplicate:
@@ -3273,7 +3324,7 @@ discard_invalid:
   {
     GST_DEBUG_OBJECT (jitterbuffer,
         "cannot calculate a valid pts for #%d (rtx: %d), discard",
-        seqnum, GST_BUFFER_IS_RETRANSMISSION (buffer));
+        seqnum, is_rtx);
     gst_buffer_unref (buffer);
     goto finished;
   }
@@ -3766,7 +3817,7 @@ update_rtx_stats (GstRtpJitterBuffer * jitterbuffer, const RtpTimer * timer,
 /* the timeout for when we expected a packet expired */
 static gboolean
 do_expected_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
-    GstClockTime now)
+    GstClockTime now, GQueue * events)
 {
   GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
   GstEvent *event;
@@ -3804,6 +3855,7 @@ do_expected_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
           "deadline", G_TYPE_UINT, rtx_deadline_ms,
           "packet-spacing", G_TYPE_UINT64, priv->packet_spacing,
           "avg-rtt", G_TYPE_UINT, avg_rtx_rtt_ms, NULL));
+  g_queue_push_tail (events, event);
   GST_DEBUG_OBJECT (jitterbuffer, "Request RTX: %" GST_PTR_FORMAT, event);
 
   priv->num_rtx_requests++;
@@ -3841,10 +3893,6 @@ do_expected_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
   rtp_timer_queue_update_timer (priv->timers, timer, timer->seqnum,
       timer->rtx_base + timer->rtx_retry, timer->rtx_delay, offset, FALSE);
 
-  JBUF_UNLOCK (priv);
-  gst_pad_push_event (priv->sinkpad, event);
-  JBUF_LOCK (priv);
-
   return FALSE;
 }
 
@@ -3854,55 +3902,11 @@ do_lost_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
     GstClockTime now)
 {
   GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
-  guint seqnum, lost_packets, num_rtx_retry, next_in_seqnum;
-  gboolean head;
-  GstEvent *event = NULL;
-  RTPJitterBufferItem *item;
+  GstClockTime timestamp;
 
-  seqnum = timer->seqnum;
-  lost_packets = MAX (timer->num, 1);
-  num_rtx_retry = timer->num_rtx_retry;
-
-  /* we had a gap and thus we lost some packets. Create an event for this.  */
-  if (lost_packets > 1)
-    GST_DEBUG_OBJECT (jitterbuffer, "Packets #%d -> #%d lost", seqnum,
-        seqnum + lost_packets - 1);
-  else
-    GST_DEBUG_OBJECT (jitterbuffer, "Packet #%d lost", seqnum);
-
-  priv->num_lost += lost_packets;
-  priv->num_rtx_failed += num_rtx_retry;
-
-  next_in_seqnum = (seqnum + lost_packets) & 0xffff;
-
-  /* we now only accept seqnum bigger than this */
-  if (gst_rtp_buffer_compare_seqnum (priv->next_in_seqnum, next_in_seqnum) > 0) {
-    priv->next_in_seqnum = next_in_seqnum;
-    priv->last_in_pts = apply_offset (jitterbuffer, get_pts_timeout (timer));
-  }
-
-  /* Avoid creating events if we don't need it. Note that we still need to create
-   * the lost *ITEM* since it will be used to notify the outgoing thread of
-   * lost items (so that we can set discont flags and such) */
-  if (priv->do_lost) {
-    GstClockTime duration, timestamp;
-    /* create packet lost event */
-    timestamp = apply_offset (jitterbuffer, get_pts_timeout (timer));
-    duration = timer->duration;
-    if (duration == GST_CLOCK_TIME_NONE && priv->packet_spacing > 0)
-      duration = priv->packet_spacing;
-    event = gst_event_new_custom (GST_EVENT_CUSTOM_DOWNSTREAM,
-        gst_structure_new ("GstRTPPacketLost",
-            "seqnum", G_TYPE_UINT, (guint) seqnum,
-            "timestamp", G_TYPE_UINT64, timestamp,
-            "duration", G_TYPE_UINT64, duration,
-            "retry", G_TYPE_UINT, num_rtx_retry, NULL));
-  }
-  item = rtp_jitter_buffer_alloc_item (event, ITEM_TYPE_LOST, -1, -1, seqnum,
-      lost_packets, -1, (GDestroyNotify) gst_mini_object_unref);
-  if (!rtp_jitter_buffer_insert (priv->jbuf, item, &head, NULL))
-    /* Duplicate */
-    rtp_jitter_buffer_free_item (item);
+  timestamp = apply_offset (jitterbuffer, get_pts_timeout (timer));
+  insert_lost_event (jitterbuffer, timer->seqnum, 1, timestamp,
+      timer->duration, timer->num_rtx_retry);
 
   if (GST_CLOCK_TIME_IS_VALID (timer->rtx_last)) {
     /* Store info to update stats if the packet arrives too late */
@@ -3912,9 +3916,6 @@ do_lost_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
   } else {
     rtp_timer_free (timer);
   }
-
-  if (head)
-    JBUF_SIGNAL_EVENT (priv);
 
   return TRUE;
 }
@@ -3961,13 +3962,13 @@ do_deadline_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
 
 static gboolean
 do_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
-    GstClockTime now)
+    GstClockTime now, GQueue * events)
 {
   gboolean removed = FALSE;
 
   switch (timer->type) {
     case RTP_TIMER_EXPECTED:
-      removed = do_expected_timeout (jitterbuffer, timer, now);
+      removed = do_expected_timeout (jitterbuffer, timer, now, events);
       break;
     case RTP_TIMER_LOST:
       removed = do_lost_timeout (jitterbuffer, timer, now);
@@ -3980,6 +3981,35 @@ do_timeout (GstRtpJitterBuffer * jitterbuffer, RtpTimer * timer,
       break;
   }
   return removed;
+}
+
+static void
+push_rtx_events_unlocked (GstRtpJitterBuffer * jitterbuffer, GQueue * events)
+{
+  GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
+  GstEvent *event;
+
+  while ((event = (GstEvent *) g_queue_pop_head (events)))
+    gst_pad_push_event (priv->sinkpad, event);
+}
+
+/* called with JBUF lock
+ *
+ * Pushes all events in @events queue.
+ *
+ * Returns: %TRUE if the timer thread is not longer running
+ */
+static void
+push_rtx_events (GstRtpJitterBuffer * jitterbuffer, GQueue * events)
+{
+  GstRtpJitterBufferPrivate *priv = jitterbuffer->priv;
+
+  if (events->length == 0)
+    return;
+
+  JBUF_UNLOCK (priv);
+  push_rtx_events_unlocked (jitterbuffer, events);
+  JBUF_LOCK (priv);
 }
 
 /* called when we need to wait for the next timeout.
@@ -3998,7 +4028,7 @@ wait_next_timeout (GstRtpJitterBuffer * jitterbuffer)
   JBUF_LOCK (priv);
   while (priv->timer_running) {
     RtpTimer *timer = NULL;
-    GQueue timers = G_QUEUE_INIT;
+    GQueue events = G_QUEUE_INIT;
 
     /* don't produce data in paused */
     while (priv->blocked) {
@@ -4031,25 +4061,8 @@ wait_next_timeout (GstRtpJitterBuffer * jitterbuffer)
       rtp_timer_queue_remove_until (priv->rtx_stats_timers, now);
 
     /* Iterate expired "normal" timers */
-    while ((timer = rtp_timer_queue_pop_until (priv->timers, now))) {
-      do {
-        if (timer->type == RTP_TIMER_LOST) {
-          GST_DEBUG_OBJECT (jitterbuffer, "Weeding out expired lost timers");
-          do_lost_timeout (jitterbuffer, timer, now);
-        } else {
-          g_queue_push_tail_link (&timers, (GList *) timer);
-        }
-      } while ((timer = rtp_timer_queue_pop_until (priv->timers, now)));
-
-      /* execute the remaining timers */
-      while ((timer = (RtpTimer *) g_queue_pop_head_link (&timers)))
-        do_timeout (jitterbuffer, timer, now);
-
-      /* do_expected_timeout(), called by do_timeout will drop the
-       * JBUF_LOCK, so we need to check if we are still running */
-      if (!priv->timer_running)
-        goto stopping;
-    }
+    while ((timer = rtp_timer_queue_pop_until (priv->timers, now)))
+      do_timeout (jitterbuffer, timer, now, &events);
 
     timer = rtp_timer_queue_peek_earliest (priv->timers);
     if (timer) {
@@ -4070,6 +4083,7 @@ wait_next_timeout (GstRtpJitterBuffer * jitterbuffer)
         /* let's just push if there is no clock */
         GST_DEBUG_OBJECT (jitterbuffer, "No clock, timeout right away");
         now = timer->timeout;
+        push_rtx_events (jitterbuffer, &events);
         continue;
       }
 
@@ -4091,18 +4105,21 @@ wait_next_timeout (GstRtpJitterBuffer * jitterbuffer)
       /* release the lock so that the other end can push stuff or unlock */
       JBUF_UNLOCK (priv);
 
+      push_rtx_events_unlocked (jitterbuffer, &events);
+
       ret = gst_clock_id_wait (id, &clock_jitter);
 
       JBUF_LOCK (priv);
 
       if (!priv->timer_running) {
+        g_queue_clear_full (&events, (GDestroyNotify) gst_event_unref);
         gst_clock_id_unref (id);
         priv->clock_id = NULL;
         break;
       }
 
       if (ret != GST_CLOCK_UNSCHEDULED) {
-        now = timer->timeout + MAX (clock_jitter, 0);
+        now = priv->timer_timeout + MAX (clock_jitter, 0);
         GST_DEBUG_OBJECT (jitterbuffer,
             "sync done, %d, #%d, %" GST_STIME_FORMAT, ret, priv->timer_seqnum,
             GST_STIME_ARGS (clock_jitter));
@@ -4114,6 +4131,8 @@ wait_next_timeout (GstRtpJitterBuffer * jitterbuffer)
       gst_clock_id_unref (id);
       priv->clock_id = NULL;
     } else {
+      push_rtx_events_unlocked (jitterbuffer, &events);
+
       /* when draining the timers, the pusher thread will reuse our
        * condition to wait for completion. Signal that thread before
        * sleeping again here */
@@ -4148,9 +4167,9 @@ gst_rtp_jitter_buffer_loop (GstRtpJitterBuffer * jitterbuffer)
   JBUF_LOCK_CHECK (priv, flushing);
   do {
     result = handle_next_buffer (jitterbuffer);
-    JBUF_SIGNAL_QUEUE (priv);
     if (G_LIKELY (result == GST_FLOW_WAIT)) {
       /* now wait for the next event */
+      JBUF_SIGNAL_QUEUE (priv);
       JBUF_WAIT_EVENT (priv, flushing);
       result = GST_FLOW_OK;
     }
@@ -4380,17 +4399,11 @@ gst_rtp_jitter_buffer_sink_query (GstPad * pad, GstObject * parent,
     }
     default:
       if (GST_QUERY_IS_SERIALIZED (query)) {
-        RTPJitterBufferItem *item;
-        gboolean head;
-
         JBUF_LOCK_CHECK (priv, out_flushing);
         if (rtp_jitter_buffer_get_mode (priv->jbuf) !=
             RTP_JITTER_BUFFER_MODE_BUFFER) {
           GST_DEBUG_OBJECT (jitterbuffer, "adding serialized query");
-          item = rtp_jitter_buffer_alloc_item (query, ITEM_TYPE_QUERY, -1, -1,
-              -1, 0, -1, NULL);
-          rtp_jitter_buffer_insert (priv->jbuf, item, &head, NULL);
-          if (head)
+          if (rtp_jitter_buffer_append_query (priv->jbuf, query))
             JBUF_SIGNAL_EVENT (priv);
           JBUF_WAIT_QUERY (priv, out_flushing);
           res = priv->last_query;

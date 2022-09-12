@@ -268,7 +268,7 @@ struct _GstRTSPSrc {
   gboolean          do_retransmission;
   gint              ntp_time_source;
   gchar            *user_agent;
-  GstClockTime      max_rtcp_rtp_time_diff;
+  gint              max_rtcp_rtp_time_diff;
   gboolean          rfc7273_sync;
   guint64           max_ts_offset_adjustment;
   gint64            max_ts_offset;
@@ -303,6 +303,7 @@ struct _GstRTSPSrc {
    * between any two random access points
    *  */
   gfloat             seekable;
+  guint32            seek_seqnum;
   GstClockTime       last_pos;
 
   /* session management */
@@ -323,6 +324,9 @@ struct _GstRTSPSrc {
   GstRTSPVersion version;
 
   GstEvent *initial_seek;
+
+  guint group_id;
+  GMutex group_lock;
 };
 
 struct _GstRTSPSrcClass {

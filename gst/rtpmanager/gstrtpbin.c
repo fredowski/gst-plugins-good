@@ -701,6 +701,7 @@ create_session (GstRtpBin * rtpbin, gint id)
 
   /* configure SDES items */
   GST_OBJECT_LOCK (rtpbin);
+  g_object_set (demux, "max-streams", rtpbin->max_streams, NULL);
   g_object_set (session, "sdes", rtpbin->sdes, "rtp-profile",
       rtpbin->rtp_profile, "rtcp-sync-send-time", rtpbin->rtcp_sync_send_time,
       NULL);
@@ -858,6 +859,7 @@ free_session (GstRtpBinSession * sess, GstRtpBin * bin)
 
   g_slist_foreach (sess->elements, (GFunc) remove_bin_element, bin);
   g_slist_free (sess->elements);
+  sess->elements = NULL;
 
   g_slist_foreach (sess->streams, (GFunc) free_stream, bin);
   g_slist_free (sess->streams);
@@ -1782,25 +1784,18 @@ create_stream (GstRtpBinSession * session, guint32 ssrc)
   if (g_object_class_find_property (jb_class, "max-dropout-time"))
     g_object_set (buffer, "max-dropout-time", rtpbin->max_dropout_time, NULL);
   if (g_object_class_find_property (jb_class, "max-misorder-time"))
-    g_object_set (buffer, "max-dropout-time", rtpbin->max_misorder_time, NULL);
+    g_object_set (buffer, "max-misorder-time", rtpbin->max_misorder_time, NULL);
   if (g_object_class_find_property (jb_class, "rfc7273-sync"))
     g_object_set (buffer, "rfc7273-sync", rtpbin->rfc7273_sync, NULL);
   if (g_object_class_find_property (jb_class, "max-ts-offset-adjustment"))
     g_object_set (buffer, "max-ts-offset-adjustment",
         rtpbin->max_ts_offset_adjustment, NULL);
 
-  /* need to sink the jitterbufer or otherwise signal handlers from bindings will
-   * take ownership of it and we don't own it anymore */
-  gst_object_ref_sink (buffer);
   g_signal_emit (rtpbin, gst_rtp_bin_signals[SIGNAL_NEW_JITTERBUFFER], 0,
       buffer, session->id, ssrc);
 
   if (!rtpbin->ignore_pt)
     gst_bin_add (GST_BIN_CAST (rtpbin), demux);
-
-  /* unref the jitterbuffer again, the bin has a reference now and
-   * we don't need it anymore */
-  gst_object_unref (buffer);
 
   /* link stuff */
   if (demux)
@@ -1855,6 +1850,7 @@ no_demux:
 static void
 free_stream (GstRtpBinStream * stream, GstRtpBin * bin)
 {
+  GstRtpBinSession *sess = stream->session;
   GSList *clients, *next_client;
 
   GST_DEBUG_OBJECT (bin, "freeing stream %p", stream);
@@ -1881,7 +1877,10 @@ free_stream (GstRtpBinStream * stream, GstRtpBin * bin)
   if (stream->buffer_ntpstop_sig)
     g_signal_handler_disconnect (stream->buffer, stream->buffer_ntpstop_sig);
 
+  sess->elements = g_slist_remove (sess->elements, stream->buffer);
+  remove_bin_element (stream->buffer, bin);
   gst_object_unref (stream->buffer);
+
   if (stream->demux)
     gst_bin_remove (GST_BIN_CAST (bin), stream->demux);
 
@@ -2685,6 +2684,8 @@ gst_rtp_bin_class_init (GstRtpBinClass * klass)
       GST_DEBUG_FUNCPTR (gst_rtp_bin_request_jitterbuffer);
 
   GST_DEBUG_CATEGORY_INIT (gst_rtp_bin_debug, "rtpbin", 0, "RTP bin");
+
+  gst_type_mark_as_plugin_api (GST_RTP_BIN_RTCP_SYNC_TYPE, 0);
 }
 
 static void
@@ -3216,7 +3217,7 @@ gst_rtp_bin_handle_message (GstBin * bin, GstMessage * message)
                 streams = g_slist_next (streams)) {
               GstRtpBinStream *stream = (GstRtpBinStream *) streams->data;
               GstElement *element = stream->buffer;
-              guint64 last_out;
+              guint64 last_out = -1;
 
               if (g_signal_lookup ("set-active", G_OBJECT_TYPE (element)) != 0) {
                 g_signal_emit_by_name (element, "set-active", active, offset,
@@ -3888,7 +3889,8 @@ create_recv_rtp (GstRtpBin * rtpbin, GstPadTemplate * templ, const gchar * name)
   /* ERRORS */
 no_name:
   {
-    g_warning ("rtpbin: invalid name given");
+    g_warning ("rtpbin: cannot find session id for pad: %s",
+        GST_STR_NULL (name));
     return NULL;
   }
 create_error:
@@ -4063,7 +4065,8 @@ create_recv_rtcp (GstRtpBin * rtpbin, GstPadTemplate * templ,
   /* ERRORS */
 no_name:
   {
-    g_warning ("rtpbin: invalid name given");
+    g_warning ("rtpbin: cannot find session id for pad: %s",
+        GST_STR_NULL (name));
     return NULL;
   }
 create_error:
@@ -4392,7 +4395,8 @@ create_send_rtp (GstRtpBin * rtpbin, GstPadTemplate * templ, const gchar * name)
   /* ERRORS */
 no_name:
   {
-    g_warning ("rtpbin: invalid name given");
+    g_warning ("rtpbin: cannot find session id for pad: %s",
+        GST_STR_NULL (name));
     return NULL;
   }
 create_error:
@@ -4546,7 +4550,8 @@ create_send_rtcp (GstRtpBin * rtpbin, GstPadTemplate * templ,
   /* ERRORS */
 no_name:
   {
-    g_warning ("rtpbin: invalid name given");
+    g_warning ("rtpbin: cannot find session id for pad: %s",
+        GST_STR_NULL (name));
     return NULL;
   }
 create_error:

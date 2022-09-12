@@ -28,11 +28,7 @@
 #include <gst/check/gstcheck.h>
 #include <gst/check/gsttestclock.h>
 #include <gst/check/gstharness.h>
-
 #include <gst/rtp/gstrtpbuffer.h>
-
-#include "gst/rtpmanager/gstrtpjitterbuffer.h"
-#include "gst/rtpmanager/rtptimerqueue.h"
 
 /* For ease of programming we use globals to keep refs for our floating
  * src and sink pads we create; otherwise we always have to do get_pad,
@@ -530,6 +526,17 @@ push_test_buffer (GstHarness * h, guint seq_num)
   gst_harness_set_time (h, seq_num * TEST_BUF_DURATION);
   fail_unless_equals_int (GST_FLOW_OK, gst_harness_push (h,
           generate_test_buffer (seq_num)));
+}
+
+static void
+push_test_buffer_now (GstHarness * h, guint seqnum, guint32 rtptime,
+    gboolean rtx)
+{
+  GstClockTime now = gst_clock_get_time (GST_ELEMENT_CLOCK (h->element));
+  GstBuffer *buf = generate_test_buffer_full (now, seqnum, rtptime);
+  if (rtx)
+    GST_BUFFER_FLAG_SET (buf, GST_RTP_BUFFER_FLAG_RETRANSMISSION);
+  fail_unless_equals_int (GST_FLOW_OK, gst_harness_push (h, buf));
 }
 
 static gint
@@ -1285,7 +1292,7 @@ GST_START_TEST (test_rtx_expected_next)
    * that will have a timeout of the expected arrival-time for that seqnum,
    * and a delay equal to 2*jitter==0 and 0.5*packet_spacing==10ms */
   timeout = next_seqnum * TEST_BUF_DURATION;
-  rtx_delay_ms = 0.5 * TEST_BUF_MS;
+  rtx_delay_ms = TEST_BUF_MS / 2;
 
   /* We crank the clock to time-out the next scheduled timer */
   gst_harness_crank_single_clock_wait (h);
@@ -1394,8 +1401,8 @@ GST_START_TEST (test_rtx_two_missing)
   gint latency_ms = 200;
   guint next_seqnum;
   GstClockTime last_rtx_request, now;
-  gint rtx_delay_ms_0 = 0.5 * TEST_BUF_MS;
-  gint rtx_delay_ms_1 = 1.0 * TEST_BUF_MS;
+  gint rtx_delay_ms_0 = TEST_BUF_MS / 2;
+  gint rtx_delay_ms_1 = TEST_BUF_MS;
 
   g_object_set (h->element, "do-retransmission", TRUE, NULL);
   next_seqnum = construct_deterministic_initial_state (h, latency_ms);
@@ -1485,7 +1492,7 @@ GST_START_TEST (test_rtx_buffer_arrives_just_in_time)
   gint next_seqnum;
   GstBuffer *buffer;
   GstClockTime now, last_rtx_request;
-  gint rtx_delay_ms = 0.5 * TEST_BUF_MS;
+  gint rtx_delay_ms = TEST_BUF_MS / 2;
 
   g_object_set (h->element, "do-retransmission", TRUE,
       "rtx-max-retries", 1, NULL);
@@ -1531,7 +1538,7 @@ GST_START_TEST (test_rtx_buffer_arrives_too_late)
   gint latency_ms = 5 * TEST_BUF_MS;
   gint next_seqnum;
   GstClockTime now, last_rtx_request;
-  gint rtx_delay_ms = 0.5 * TEST_BUF_MS;
+  gint rtx_delay_ms = TEST_BUF_MS / 2;
 
   g_object_set (h->element, "do-retransmission", TRUE,
       "do-lost", TRUE, "rtx-max-retries", 1, NULL);
@@ -1581,7 +1588,7 @@ GST_START_TEST (test_rtx_original_buffer_does_not_update_rtx_stats)
   gint next_seqnum;
   GstBuffer *buffer;
   GstClockTime now, last_rtx_request;
-  gint rtx_delay_ms = 0.5 * TEST_BUF_MS;
+  gint rtx_delay_ms = TEST_BUF_MS / 2;
 
   g_object_set (h->element, "do-retransmission", TRUE,
       "rtx-max-retries", 1, NULL);
@@ -1659,8 +1666,8 @@ GST_START_TEST (test_rtx_duplicate_packet_updates_rtx_stats)
   gint latency_ms = 100;
   gint next_seqnum;
   GstClockTime now, rtx_request_6, rtx_request_7;
-  gint rtx_delay_ms_0 = 0.5 * TEST_BUF_MS;
-  gint rtx_delay_ms_1 = 1.0 * TEST_BUF_MS;
+  gint rtx_delay_ms_0 = TEST_BUF_MS / 2;
+  gint rtx_delay_ms_1 = TEST_BUF_MS;
   gint i;
 
   g_object_set (h->element, "do-retransmission", TRUE, NULL);
@@ -1764,7 +1771,7 @@ GST_START_TEST (test_rtx_buffer_arrives_after_lost_updates_rtx_stats)
   gint latency_ms = 100;
   gint next_seqnum;
   GstClockTime now, last_rtx_request;
-  gint rtx_delay_ms = 0.5 * TEST_BUF_MS;
+  gint rtx_delay_ms = TEST_BUF_MS / 2;
 
   g_object_set (h->element, "do-retransmission", TRUE,
       "do-lost", TRUE, "rtx-max-retries", 1, NULL);
@@ -1815,7 +1822,7 @@ GST_START_TEST (test_rtx_rtt_larger_than_retry_timeout)
   gint latency_ms = 100;
   gint next_seqnum;
   gint rtx_retry_timeout_ms = 20;
-  gint rtx_delay_ms = 0.5 * TEST_BUF_MS;
+  gint rtx_delay_ms = TEST_BUF_MS / 2;
   gint rtt = rtx_retry_timeout_ms * GST_MSECOND + 1;
   GstClockTime now, first_request, second_request;
 
@@ -2056,6 +2063,7 @@ GST_START_TEST (test_rtx_with_backwards_rtptime)
    * Note: the jitterbuffer no longer update early timers, as a result
    * we need to advance the clock to the expected point
    */
+  gst_harness_wait_for_clock_id_waits (h, 1, 1);
   gst_harness_set_time (h, 6 * TEST_BUF_DURATION + 15 * GST_MSECOND);
   gst_harness_crank_single_clock_wait (h);
   verify_rtx_event (h, 6, 5 * TEST_BUF_DURATION + 15 * GST_MSECOND,
@@ -2076,7 +2084,7 @@ GST_START_TEST (test_rtx_timer_reuse)
 {
   GstHarness *h = gst_harness_new ("rtpjitterbuffer");
   gint latency_ms = 5 * TEST_BUF_MS;
-  gint rtx_delay_ms = 0.5 * TEST_BUF_MS;
+  gint rtx_delay_ms = TEST_BUF_MS / 2;
   guint next_seqnum;
 
   g_object_set (h->element, "do-retransmission", TRUE,
@@ -2545,7 +2553,6 @@ GST_START_TEST (test_considered_lost_packet_in_large_gap_arrives)
 {
   GstHarness *h = gst_harness_new ("rtpjitterbuffer");
   GstTestClock *testclock;
-  GstClockID id;
   GstBuffer *buffer;
   gint jb_latency_ms = 20;
   const TestLateArrivalInput *test_input =
@@ -2570,33 +2577,24 @@ GST_START_TEST (test_considered_lost_packet_in_large_gap_arrives)
     gst_event_unref (gst_harness_pull_event (h));
 
   /* hop over 3 packets, and push buffer 4 (gap of 3) */
+  gst_harness_set_time (h, 4 * TEST_BUF_DURATION);
   fail_unless_equals_int (GST_FLOW_OK,
       gst_harness_push (h, generate_test_buffer_full (4 * TEST_BUF_DURATION,
               4 + seq_offset, 4 * TEST_RTP_TS_DURATION)));
 
-  /* the jitterbuffer should be waiting for the timeout of a "large gap timer"
-   * for buffer 1 and 2 */
-  gst_test_clock_wait_for_next_pending_id (testclock, &id);
-  fail_unless_equals_uint64 (1 * TEST_BUF_DURATION +
-      jb_latency_ms * GST_MSECOND, gst_clock_id_get_time (id));
-  gst_clock_id_unref (id);
+  /* we get a "bundled" lost-event for the 2 packets now already too late */
+  verify_lost_event (h, 1 + seq_offset, 1 * TEST_BUF_DURATION,
+      2 * TEST_BUF_DURATION);
 
-  /* now buffer 1 sneaks in before the lost event for buffer 1 and 2 is
-   * processed */
+  /* and another one for buffer 3 */
+  verify_lost_event (h, 3 + seq_offset, 3 * TEST_BUF_DURATION,
+      1 * TEST_BUF_DURATION);
+
+  /* A late buffer arrives */
   fail_unless_equals_int (GST_FLOW_OK,
       gst_harness_push (h,
           generate_test_buffer_full (late_buffer * TEST_BUF_DURATION,
               late_buffer + seq_offset, late_buffer * TEST_RTP_TS_DURATION)));
-
-  /* time out for lost packets 1 and 2 (one event, double duration) */
-  fail_unless (gst_harness_crank_single_clock_wait (h));
-  verify_lost_event (h, 1 + seq_offset, 1 * TEST_BUF_DURATION,
-      2 * TEST_BUF_DURATION);
-
-  /* time out for lost packets 3 */
-  fail_unless (gst_harness_crank_single_clock_wait (h));
-  verify_lost_event (h, 3 + seq_offset, 3 * TEST_BUF_DURATION,
-      1 * TEST_BUF_DURATION);
 
   /* buffer 4 is pushed as normal */
   buffer = gst_harness_pull (h);
@@ -2765,295 +2763,6 @@ GST_START_TEST (test_dont_drop_packet_based_on_skew)
 
 GST_END_TEST;
 
-GST_START_TEST (test_timer_queue_set_timer)
-{
-  RtpTimerQueue *queue = rtp_timer_queue_new ();
-  RtpTimer *timer10, *timer0;
-
-  rtp_timer_queue_set_timer (queue, RTP_TIMER_EXPECTED, 10, 0,
-      1 * GST_SECOND, 2 * GST_SECOND, 5 * GST_SECOND, 0);
-  timer10 = rtp_timer_queue_find (queue, 10);
-  fail_unless (timer10);
-  fail_unless_equals_int (10, timer10->seqnum);
-  fail_unless_equals_int (0, timer10->num);
-  fail_unless_equals_int (RTP_TIMER_EXPECTED, timer10->type);
-  /* timer10->timeout = timerout + delay */
-  fail_unless_equals_uint64 (3 * GST_SECOND, timer10->timeout);
-  fail_unless_equals_uint64 (5 * GST_SECOND, timer10->duration);
-  fail_unless_equals_uint64 (1 * GST_SECOND, timer10->rtx_base);
-  fail_unless_equals_uint64 (2 * GST_SECOND, timer10->rtx_delay);
-  fail_unless_equals_uint64 (0, timer10->rtx_retry);
-  fail_unless_equals_uint64 (GST_CLOCK_TIME_NONE, timer10->rtx_last);
-  fail_unless_equals_int (0, timer10->num_rtx_retry);
-  fail_unless_equals_int (0, timer10->num_rtx_received);
-
-  rtp_timer_queue_set_timer (queue, RTP_TIMER_LOST, 0, 10,
-      0 * GST_SECOND, 2 * GST_SECOND, 0, 0);
-  timer0 = rtp_timer_queue_find (queue, 0);
-  fail_unless (timer0);
-  fail_unless_equals_int (0, timer0->seqnum);
-  fail_unless_equals_int (10, timer0->num);
-  fail_unless_equals_int (RTP_TIMER_LOST, timer0->type);
-  fail_unless_equals_uint64 (2 * GST_SECOND, timer0->timeout);
-  fail_unless_equals_uint64 (0, timer0->duration);
-  fail_unless_equals_uint64 (0, timer0->rtx_base);
-  fail_unless_equals_uint64 (0, timer0->rtx_delay);
-  fail_unless_equals_uint64 (0, timer0->rtx_retry);
-  fail_unless_equals_uint64 (GST_CLOCK_TIME_NONE, timer0->rtx_last);
-  fail_unless_equals_int (0, timer0->num_rtx_retry);
-  fail_unless_equals_int (0, timer0->num_rtx_received);
-
-  /* also check order while at it */
-  fail_unless (timer10->list.next == NULL);
-  fail_unless (timer10->list.prev == (GList *) timer0);
-  fail_unless (timer0->list.next == (GList *) timer10);
-  fail_unless (timer0->list.prev == NULL);
-
-  g_object_unref (queue);
-}
-
-GST_END_TEST;
-
-GST_START_TEST (test_timer_queue_insert_head)
-{
-  RtpTimerQueue *queue = rtp_timer_queue_new ();
-  RtpTimer *timer, *next, *prev;
-
-  rtp_timer_queue_set_deadline (queue, 1, -1, 0);
-  rtp_timer_queue_set_deadline (queue, 3, -1, 0);
-  rtp_timer_queue_set_deadline (queue, 2, -1, 0);
-  rtp_timer_queue_set_deadline (queue, 0, -1, 0);
-
-  timer = rtp_timer_queue_find (queue, 0);
-  fail_if (timer == NULL);
-  fail_unless_equals_int (0, timer->seqnum);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_unless (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (1, next->seqnum);
-
-  timer = rtp_timer_queue_find (queue, 3);
-  fail_if (timer == NULL);
-  fail_unless_equals_int (3, timer->seqnum);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_unless_equals_int (2, prev->seqnum);
-  fail_unless (next == NULL);
-
-  timer = rtp_timer_queue_find (queue, 2);
-  fail_if (timer == NULL);
-  fail_unless_equals_int (2, timer->seqnum);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (1, prev->seqnum);
-  fail_unless_equals_int (3, next->seqnum);
-
-  timer = rtp_timer_queue_find (queue, 1);
-  fail_if (timer == NULL);
-  fail_unless_equals_int (1, timer->seqnum);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (0, prev->seqnum);
-  fail_unless_equals_int (2, next->seqnum);
-
-  g_object_unref (queue);
-}
-
-GST_END_TEST;
-
-GST_START_TEST (test_timer_queue_reschedule)
-{
-  RtpTimerQueue *queue = rtp_timer_queue_new ();
-  RtpTimer *timer, *next, *prev;
-
-  rtp_timer_queue_set_deadline (queue, 3, 1 * GST_SECOND, 0);
-  rtp_timer_queue_set_deadline (queue, 1, 2 * GST_SECOND, 0);
-  rtp_timer_queue_set_deadline (queue, 2, 3 * GST_SECOND, 0);
-  rtp_timer_queue_set_deadline (queue, 0, 4 * GST_SECOND, 0);
-
-  timer = rtp_timer_queue_find (queue, 1);
-  fail_if (timer == NULL);
-
-  /* move to head, making sure seqnum order is respected */
-  rtp_timer_queue_set_deadline (queue, 1, 1 * GST_SECOND, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_unless (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (3, next->seqnum);
-
-  /* move head back */
-  rtp_timer_queue_set_deadline (queue, 1, 2 * GST_SECOND, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (3, prev->seqnum);
-  fail_unless_equals_int (2, next->seqnum);
-
-  /* move to tail */
-  timer = rtp_timer_queue_find (queue, 2);
-  fail_if (timer == NULL);
-  rtp_timer_queue_set_deadline (queue, 2, 4 * GST_SECOND, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_unless (next == NULL);
-  fail_unless_equals_int (0, prev->seqnum);
-
-  /* move tail back */
-  rtp_timer_queue_set_deadline (queue, 2, 3 * GST_SECOND, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (1, prev->seqnum);
-  fail_unless_equals_int (0, next->seqnum);
-
-  /* not moving toward head */
-  rtp_timer_queue_set_deadline (queue, 2, 2 * GST_SECOND, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (1, prev->seqnum);
-  fail_unless_equals_int (0, next->seqnum);
-
-  /* not moving toward tail */
-  rtp_timer_queue_set_deadline (queue, 2, 3 * GST_SECOND, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (1, prev->seqnum);
-  fail_unless_equals_int (0, next->seqnum);
-
-  /* inner move toward head */
-  rtp_timer_queue_set_deadline (queue, 2, GST_SECOND + GST_SECOND / 2, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (3, prev->seqnum);
-  fail_unless_equals_int (1, next->seqnum);
-
-  /* inner move toward tail */
-  rtp_timer_queue_set_deadline (queue, 2, 3 * GST_SECOND, 0);
-  next = (RtpTimer *) timer->list.next;
-  prev = (RtpTimer *) timer->list.prev;
-  fail_if (prev == NULL);
-  fail_if (next == NULL);
-  fail_unless_equals_int (1, prev->seqnum);
-  fail_unless_equals_int (0, next->seqnum);
-
-  g_object_unref (queue);
-}
-
-GST_END_TEST;
-
-GST_START_TEST (test_timer_queue_pop_until)
-{
-  RtpTimerQueue *queue = rtp_timer_queue_new ();
-  RtpTimer *timer;
-
-  rtp_timer_queue_set_deadline (queue, 2, 2 * GST_SECOND, 0);
-  rtp_timer_queue_set_deadline (queue, 1, 1 * GST_SECOND, 0);
-  rtp_timer_queue_set_deadline (queue, 0, -1, 0);
-
-  timer = rtp_timer_queue_pop_until (queue, 1 * GST_SECOND);
-  fail_if (timer == NULL);
-  fail_unless_equals_int (0, timer->seqnum);
-  rtp_timer_free (timer);
-
-  timer = rtp_timer_queue_pop_until (queue, 1 * GST_SECOND);
-  fail_if (timer == NULL);
-  fail_unless_equals_int (1, timer->seqnum);
-  rtp_timer_free (timer);
-
-  timer = rtp_timer_queue_pop_until (queue, 1 * GST_SECOND);
-  fail_unless (timer == NULL);
-
-  g_object_unref (queue);
-}
-
-GST_END_TEST;
-
-GST_START_TEST (test_timer_queue_update_timer_seqnum)
-{
-  RtpTimerQueue *queue = rtp_timer_queue_new ();
-  RtpTimer *timer;
-
-  rtp_timer_queue_set_deadline (queue, 2, 2 * GST_SECOND, 0);
-
-  timer = rtp_timer_queue_find (queue, 2);
-  fail_if (timer == NULL);
-
-  rtp_timer_queue_update_timer (queue, timer, 3, 3 * GST_SECOND, 0, 0, FALSE);
-
-  timer = rtp_timer_queue_find (queue, 2);
-  fail_unless (timer == NULL);
-  timer = rtp_timer_queue_find (queue, 3);
-  fail_if (timer == NULL);
-
-  fail_unless_equals_int (1, rtp_timer_queue_length (queue));
-
-  g_object_unref (queue);
-}
-
-GST_END_TEST;
-
-GST_START_TEST (test_timer_queue_dup_timer)
-{
-  RtpTimerQueue *queue = rtp_timer_queue_new ();
-  RtpTimer *timer;
-
-  rtp_timer_queue_set_deadline (queue, 2, 2 * GST_SECOND, 0);
-
-  timer = rtp_timer_queue_find (queue, 2);
-  fail_if (timer == NULL);
-
-  timer = rtp_timer_dup (timer);
-  timer->seqnum = 3;
-  rtp_timer_queue_insert (queue, timer);
-
-  fail_unless_equals_int (2, rtp_timer_queue_length (queue));
-
-  g_object_unref (queue);
-}
-
-GST_END_TEST;
-
-GST_START_TEST (test_timer_queue_timer_offset)
-{
-  RtpTimerQueue *queue = rtp_timer_queue_new ();
-  RtpTimer *timer;
-
-  rtp_timer_queue_set_timer (queue, RTP_TIMER_EXPECTED, 2, 0, 2 * GST_SECOND,
-      GST_MSECOND, 0, GST_USECOND);
-
-  timer = rtp_timer_queue_find (queue, 2);
-  fail_if (timer == NULL);
-  fail_unless_equals_uint64 (2 * GST_SECOND + GST_MSECOND + GST_USECOND,
-      timer->timeout);
-  fail_unless_equals_int64 (GST_USECOND, timer->offset);
-
-  rtp_timer_queue_update_timer (queue, timer, 2, 3 * GST_SECOND,
-      2 * GST_MSECOND, 2 * GST_USECOND, FALSE);
-  fail_unless_equals_uint64 (3 * GST_SECOND + 2 * GST_MSECOND +
-      2 * GST_USECOND, timer->timeout);
-  fail_unless_equals_int64 (2 * GST_USECOND, timer->offset);
-
-  g_object_unref (queue);
-}
-
-GST_END_TEST;
-
 static gboolean
 check_drop_message (GstMessage * drop_msg, const char *reason_check,
     guint seqnum_check, guint num_msg)
@@ -3064,19 +2773,15 @@ check_drop_message (GstMessage * drop_msg, const char *reason_check,
   GstClockTime timestamp;
   guint seqnum;
   guint num_too_late;
-  guint num_already_lost;
   guint num_drop_on_latency;
 
   guint num_too_late_check = 0;
-  guint num_already_lost_check = 0;
   guint num_drop_on_latency_check = 0;
 
   /* Check that fields exist */
   fail_unless (gst_structure_get_uint (s, "seqnum", &seqnum));
   fail_unless (gst_structure_get_uint64 (s, "timestamp", &timestamp));
   fail_unless (gst_structure_get_uint (s, "num-too-late", &num_too_late));
-  fail_unless (gst_structure_get_uint (s, "num-already-lost",
-          &num_already_lost));
   fail_unless (gst_structure_get_uint (s, "num-drop-on-latency",
           &num_drop_on_latency));
   fail_unless (reason_str = gst_structure_get_string (s, "reason"));
@@ -3084,8 +2789,6 @@ check_drop_message (GstMessage * drop_msg, const char *reason_check,
   /* Assing what to compare message fields to based on message reason */
   if (g_strcmp0 (reason_check, "too-late") == 0) {
     num_too_late_check += num_msg;
-  } else if (g_strcmp0 (reason_check, "already-lost") == 0) {
-    num_already_lost_check += num_msg;
   } else if (g_strcmp0 (reason_check, "drop-on-latency") == 0) {
     num_drop_on_latency_check += num_msg;
   } else {
@@ -3096,7 +2799,6 @@ check_drop_message (GstMessage * drop_msg, const char *reason_check,
   fail_unless (seqnum == seqnum_check);
   fail_unless (g_strcmp0 (reason_str, reason_check) == 0);
   fail_unless (num_too_late == num_too_late_check);
-  fail_unless (num_already_lost == num_already_lost_check);
   fail_unless (num_drop_on_latency == num_drop_on_latency_check);
 
   return TRUE;
@@ -3145,71 +2847,6 @@ GST_START_TEST (test_drop_messages_too_late)
   /* Cleanup */
   gst_element_set_bus (h->element, NULL);
   gst_object_unref (bus);
-  gst_harness_teardown (h);
-}
-
-GST_END_TEST;
-
-GST_START_TEST (test_drop_messages_already_lost)
-{
-  GstHarness *h = gst_harness_new ("rtpjitterbuffer");
-  GstTestClock *testclock;
-  GstClockID id;
-  gint latency_ms = 20;
-  guint seqnum_late;
-  guint seqnum_final;
-  GstBus *bus;
-  GstMessage *drop_msg;
-  gboolean have_message = FALSE;
-
-  testclock = gst_harness_get_testclock (h);
-  g_object_set (h->element, "post-drop-messages", TRUE, NULL);
-
-  /* Create a bus to get the drop message on */
-  bus = gst_bus_new ();
-  gst_element_set_bus (h->element, bus);
-
-  /* Get seqnum from initial state */
-  seqnum_late = construct_deterministic_initial_state (h, latency_ms);
-
-  /* Hop over 3 buffers and push buffer (gap of 3) */
-  seqnum_final = seqnum_late + 4;
-  fail_unless_equals_int (GST_FLOW_OK,
-      gst_harness_push (h,
-          generate_test_buffer_full (seqnum_final * TEST_BUF_DURATION,
-              seqnum_final, seqnum_final * TEST_RTP_TS_DURATION)));
-
-  /* The jitterbuffer should be waiting for the timeout of a "large gap timer"
-   * for buffer seqnum_late and seqnum_late+1 */
-  gst_test_clock_wait_for_next_pending_id (testclock, &id);
-  fail_unless_equals_uint64 (seqnum_late * TEST_BUF_DURATION +
-      latency_ms * GST_MSECOND, gst_clock_id_get_time (id));
-
-  /* Now seqnum_late sneaks in before the lost event for buffer seqnum_late and seqnum_late+1 is
-   * processed. It will be dropped due to already having been considered lost */
-  fail_unless_equals_int (GST_FLOW_OK,
-      gst_harness_push (h,
-          generate_test_buffer_full (seqnum_late * TEST_BUF_DURATION,
-              seqnum_late, seqnum_late * TEST_RTP_TS_DURATION)));
-
-  /* Pop the resulting drop message and check its correctness */
-  while (!have_message &&
-      (drop_msg = gst_bus_pop_filtered (bus, GST_MESSAGE_ELEMENT)) != NULL) {
-    if (gst_message_has_name (drop_msg, "drop-msg")) {
-      fail_unless (check_drop_message (drop_msg, "already-lost", seqnum_late,
-              1));
-      have_message = TRUE;
-    }
-    gst_message_unref (drop_msg);
-  }
-  fail_unless (have_message);
-
-  /* Cleanup */
-  gst_clock_id_unref (id);
-  gst_element_set_bus (h->element, NULL);
-  gst_buffer_unref (gst_harness_take_all_data_as_buffer (h));
-  gst_object_unref (bus);
-  gst_object_unref (testclock);
   gst_harness_teardown (h);
 }
 
@@ -3340,23 +2977,186 @@ GST_START_TEST (test_drop_messages_interval)
 
 GST_END_TEST;
 
+typedef struct
+{
+  gint seqnum_d;
+  gint rtptime_d;
+  gboolean rtx;
+  gint sleep_us;
+} BufferArrayCtx;
+
+static void
+buffer_array_push (GstHarness * h, GArray * array,
+    guint16 seqnum_base, guint32 rtptime_base)
+{
+  guint16 seqnum = seqnum_base;
+  guint32 rtptime = rtptime_base;
+  guint i;
+
+  for (i = 0; i < array->len; i++) {
+    BufferArrayCtx *ctx = &g_array_index (array, BufferArrayCtx, i);
+    seqnum += ctx->seqnum_d;
+    rtptime += ctx->rtptime_d;
+    push_test_buffer_now (h, seqnum, rtptime, ctx->rtx);
+    g_usleep (ctx->sleep_us);
+  }
+}
+
+static gint
+buffer_array_get_max_seqnum_delta (GArray * array)
+{
+  gint delta = 0;
+  gint max_delta = 0;
+  guint i;
+
+  for (i = 0; i < array->len; i++) {
+    BufferArrayCtx *ctx = &g_array_index (array, BufferArrayCtx, i);
+    delta += ctx->seqnum_d;
+    if (delta > max_delta)
+      max_delta = delta;
+  }
+  return max_delta;
+}
+
+static void
+buffer_array_append_sequential (GArray * array, guint num_bufs)
+{
+  guint i;
+  for (i = 0; i < num_bufs; i++) {
+    BufferArrayCtx ctx;
+    ctx.seqnum_d = 1;
+    ctx.rtptime_d = TEST_RTP_TS_DURATION;       /* 20ms for 8KHz */
+    ctx.rtx = FALSE;
+    ctx.sleep_us = G_USEC_PER_SEC / 1000 * 20;  /* 20ms */
+    g_array_append_val (array, ctx);
+  }
+}
+
+static void
+buffer_array_append_ctx (GArray * array, BufferArrayCtx * bufs, guint num_bufs)
+{
+  guint i;
+  for (i = 0; i < num_bufs; i++) {
+    g_array_append_val (array, bufs[i]);
+  }
+}
+
+static gboolean
+check_for_stall (GstHarness * h, BufferArrayCtx * bufs, guint num_bufs)
+{
+  guint latency_ms;
+  guint initial_bufs;
+  guint16 base_seqnum = 10000;
+  guint32 base_rtptime = base_seqnum * TEST_RTP_TS_DURATION;
+  guint16 max_seqnum;
+  guint in_queue;
+  GArray *array;
+
+  gst_harness_use_systemclock (h);
+  gst_harness_set_src_caps (h, generate_caps ());
+
+  g_object_get (h->element, "latency", &latency_ms, NULL);
+  initial_bufs = latency_ms / TEST_BUF_MS;
+
+  array = g_array_new (FALSE, FALSE, sizeof (BufferArrayCtx));
+  buffer_array_append_sequential (array, initial_bufs);
+  buffer_array_append_ctx (array, bufs, num_bufs);
+  max_seqnum = base_seqnum + buffer_array_get_max_seqnum_delta (array);
+  buffer_array_push (h, array, base_seqnum, base_rtptime);
+  g_array_set_size (array, 0);
+
+  /* sleep a bit to settle things down, then find out
+     how many buffers have been pushed out */
+  g_usleep (G_USEC_PER_SEC);
+  in_queue = gst_harness_buffers_in_queue (h);
+
+  /* push another 50 buffers normally */
+  buffer_array_append_sequential (array, 50);
+  base_seqnum = max_seqnum + 1;
+  base_rtptime = base_seqnum * TEST_RTP_TS_DURATION;
+  buffer_array_push (h, array, base_seqnum, base_rtptime);
+  g_array_unref (array);
+
+  /* we expect at least some of those buffers to come through */
+  return gst_harness_buffers_in_queue (h) > in_queue;
+}
+
+GST_START_TEST (test_reset_timers_does_not_stall)
+{
+  GstHarness *h = gst_harness_new ("rtpjitterbuffer");
+  BufferArrayCtx bufs[] = {
+    /* *INDENT-OFF* */
+    { 1, 0, FALSE, 0},
+    { 2, 0, FALSE, 0},
+    { 3, 0, FALSE, 0},
+    { 4, 0, FALSE, 0},
+    { 5, 0, FALSE, 0},
+    { 6, 0, FALSE, 0},
+    { 7, 0, FALSE, 0},
+    { 8, 0, FALSE, 0},
+    { 9, 0, FALSE, 0},
+    {10, 0, FALSE, 0},
+    /* *INDENT-ON* */
+  };
+
+  g_object_set (h->element, "latency", 100,
+      "do-retransmission", TRUE, "do-lost", TRUE, NULL);
+  g_object_set (h->element, "max-dropout-time", 10, NULL);
+  fail_unless (check_for_stall (h, bufs, G_N_ELEMENTS (bufs)));
+  gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_multiple_lost_do_not_stall)
+{
+  GstHarness *h = gst_harness_new ("rtpjitterbuffer");
+  BufferArrayCtx bufs[] = {
+    /* *INDENT-OFF* */
+    { 39,  4960, FALSE,   58},
+    {-28, -5280, FALSE, 1000},
+    /* *INDENT-ON* */
+  };
+
+  g_object_set (h->element, "latency", 200,
+      "do-retransmission", TRUE, "do-lost", TRUE, NULL);
+  fail_unless (check_for_stall (h, bufs, G_N_ELEMENTS (bufs)));
+  gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_reset_using_rtx_packets_does_not_stall)
+{
+  GstHarness *h = gst_harness_new ("rtpjitterbuffer");
+  BufferArrayCtx bufs[] = {
+    /* *INDENT-OFF* */
+    {  1,    1 * TEST_RTP_TS_DURATION, FALSE, 2000000},
+    {  62,  62 * TEST_RTP_TS_DURATION, FALSE, 0},
+    { -13, -13 * TEST_RTP_TS_DURATION, TRUE, 10000},
+    {   1,   1 * TEST_RTP_TS_DURATION, TRUE, 0},
+    {   1,   1 * TEST_RTP_TS_DURATION, TRUE, 0},
+    {   1,   1 * TEST_RTP_TS_DURATION, TRUE, 0},
+    {   1,   1 * TEST_RTP_TS_DURATION, TRUE, 0},
+    {   1,   1 * TEST_RTP_TS_DURATION, TRUE, 0},
+    /* *INDENT-ON* */
+  };
+
+  g_object_set (h->element, "latency", 400,
+      "do-retransmission", TRUE, "do-lost", TRUE, "max-misorder-time", 1, NULL);
+  fail_unless (check_for_stall (h, bufs, G_N_ELEMENTS (bufs)));
+  gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
 static Suite *
 rtpjitterbuffer_suite (void)
 {
   Suite *s = suite_create ("rtpjitterbuffer");
   TCase *tc_chain = tcase_create ("general");
 
-  gst_element_register (NULL, "rtpjitterbuffer", GST_RANK_NONE,
-      GST_TYPE_RTP_JITTER_BUFFER);
-
   suite_add_tcase (s, tc_chain);
-  tcase_add_test (tc_chain, test_timer_queue_set_timer);
-  tcase_add_test (tc_chain, test_timer_queue_insert_head);
-  tcase_add_test (tc_chain, test_timer_queue_reschedule);
-  tcase_add_test (tc_chain, test_timer_queue_pop_until);
-  tcase_add_test (tc_chain, test_timer_queue_update_timer_seqnum);
-  tcase_add_test (tc_chain, test_timer_queue_dup_timer);
-  tcase_add_test (tc_chain, test_timer_queue_timer_offset);
 
   tcase_add_test (tc_chain, test_push_forward_seq);
   tcase_add_test (tc_chain, test_push_backward_seq);
@@ -3414,9 +3214,13 @@ rtpjitterbuffer_suite (void)
   tcase_add_test (tc_chain, test_performance);
 
   tcase_add_test (tc_chain, test_drop_messages_too_late);
-  tcase_add_test (tc_chain, test_drop_messages_already_lost);
   tcase_add_test (tc_chain, test_drop_messages_drop_on_latency);
   tcase_add_test (tc_chain, test_drop_messages_interval);
+
+  tcase_add_test (tc_chain, test_reset_timers_does_not_stall);
+  tcase_add_test (tc_chain, test_multiple_lost_do_not_stall);
+  tcase_add_test (tc_chain, test_reset_using_rtx_packets_does_not_stall);
+
 
   return s;
 }

@@ -181,6 +181,8 @@ gst_jpeg_dec_class_init (GstJpegDecClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (jpeg_dec_debug, "jpegdec", 0, "JPEG decoder");
   GST_DEBUG_CATEGORY_GET (GST_CAT_PERFORMANCE, "GST_PERFORMANCE");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_IDCT_METHOD, 0);
 }
 
 static boolean
@@ -866,7 +868,7 @@ gst_jpeg_dec_decode_direct (GstJpegDec * dec, GstVideoFrame * frame,
   gint lines, v_samp[3];
   guchar *base[3], *last[3];
   gint stride[3];
-  guint height;
+  guint height, field_height;
 
   line[0] = y;
   line[1] = u;
@@ -879,7 +881,12 @@ gst_jpeg_dec_decode_direct (GstJpegDec * dec, GstVideoFrame * frame,
   if (G_UNLIKELY (v_samp[0] > 2 || v_samp[1] > 2 || v_samp[2] > 2))
     goto format_not_supported;
 
-  height = GST_VIDEO_FRAME_HEIGHT (frame);
+  height = field_height = GST_VIDEO_FRAME_HEIGHT (frame);
+
+  /* XXX: division by 2 here might not be a good idea yes. But we are doing this
+   * already in gst_jpeg_dec_handle_frame() for interlaced jpeg */
+  if (num_fields == 2)
+    field_height /= 2;
 
   for (i = 0; i < 3; i++) {
     base[i] = GST_VIDEO_FRAME_COMP_DATA (frame, i);
@@ -894,7 +901,7 @@ gst_jpeg_dec_decode_direct (GstJpegDec * dec, GstVideoFrame * frame,
     }
   }
 
-  if (height % (v_samp[0] * DCTSIZE) && (dec->scratch_size < stride[0])) {
+  if (field_height % (v_samp[0] * DCTSIZE) && (dec->scratch_size < stride[0])) {
     g_free (dec->scratch);
     dec->scratch = g_malloc (stride[0]);
     dec->scratch_size = stride[0];
@@ -990,6 +997,9 @@ gst_jpeg_dec_negotiate (GstJpegDec * dec, gint width, gint height, gint clrspc,
     case JCS_GRAYSCALE:
       break;
     default:
+      /* aka JPEG chroma siting */
+      outstate->info.chroma_site = GST_VIDEO_CHROMA_SITE_NONE;
+
       outstate->info.colorimetry.range = GST_VIDEO_COLOR_RANGE_0_255;
       outstate->info.colorimetry.matrix = GST_VIDEO_COLOR_MATRIX_BT601;
       outstate->info.colorimetry.transfer = GST_VIDEO_TRANSFER_UNKNOWN;
@@ -1210,6 +1220,8 @@ gst_jpeg_dec_handle_frame (GstVideoDecoder * bdec, GstVideoCodecFrame * frame)
 
   data = dec->current_frame_map.data;
   nbytes = dec->current_frame_map.size;
+  if (nbytes < 2)
+    goto need_more_data;
   has_eoi = ((data[nbytes - 2] == 0xff) && (data[nbytes - 1] == 0xd9));
 
   /* some cameras fail to send an end-of-image marker (EOI),

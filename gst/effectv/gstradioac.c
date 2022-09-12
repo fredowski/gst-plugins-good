@@ -610,6 +610,9 @@ gst_radioactv_class_init (GstRadioacTVClass * klass)
       GST_DEBUG_FUNCPTR (gst_radioactv_transform_frame);
 
   makePalette ();
+
+  gst_type_mark_as_plugin_api (GST_TYPE_RADIOACTV_MODE, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_RADIOACTV_COLOR, 0);
 }
 
 static void

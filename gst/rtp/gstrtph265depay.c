@@ -384,7 +384,7 @@ gst_rtp_h265_depay_set_output_caps (GstRtpH265Depay * rtph265depay,
 static gboolean
 gst_rtp_h265_set_src_caps (GstRtpH265Depay * rtph265depay)
 {
-  gboolean res, update_caps;
+  gboolean res;
   GstCaps *old_caps;
   GstCaps *srccaps;
   GstPad *srcpad;
@@ -594,36 +594,9 @@ gst_rtp_h265_set_src_caps (GstRtpH265Depay * rtph265depay)
   }
 
   srcpad = GST_RTP_BASE_DEPAYLOAD_SRCPAD (rtph265depay);
-
   old_caps = gst_pad_get_current_caps (srcpad);
-  if (old_caps != NULL) {
 
-    /* Only update the caps if they are not equal. For
-     * AVC we don't update caps if only the codec_data
-     * changes. This is the same behaviour as in h264parse
-     * and gstrtph264depay
-     */
-    if (rtph265depay->byte_stream) {
-      update_caps = !gst_caps_is_equal (srccaps, old_caps);
-    } else {
-      GstCaps *tmp_caps = gst_caps_copy (srccaps);
-      GstStructure *old_s, *tmp_s;
-
-      old_s = gst_caps_get_structure (old_caps, 0);
-      tmp_s = gst_caps_get_structure (tmp_caps, 0);
-      if (gst_structure_has_field (old_s, "codec_data"))
-        gst_structure_set_value (tmp_s, "codec_data",
-            gst_structure_get_value (old_s, "codec_data"));
-
-      update_caps = !gst_caps_is_equal (old_caps, tmp_caps);
-      gst_caps_unref (tmp_caps);
-    }
-    gst_caps_unref (old_caps);
-  } else {
-    update_caps = TRUE;
-  }
-
-  if (update_caps) {
+  if (old_caps == NULL || !gst_caps_is_equal (srccaps, old_caps)) {
     res = gst_rtp_h265_depay_set_output_caps (rtph265depay, srccaps);
   } else {
     res = TRUE;
@@ -1259,6 +1232,7 @@ gst_rtp_h265_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
     gst_adapter_clear (rtph265depay->adapter);
     rtph265depay->wait_start = TRUE;
     rtph265depay->current_fu_type = 0;
+    rtph265depay->last_fu_seqnum = 0;
   }
 
   {
@@ -1456,6 +1430,7 @@ gst_rtp_h265_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
 
           rtph265depay->current_fu_type = nal_unit_type;
           rtph265depay->fu_timestamp = timestamp;
+          rtph265depay->last_fu_seqnum = gst_rtp_buffer_get_seq (rtp);
 
           rtph265depay->wait_start = FALSE;
 
@@ -1493,6 +1468,24 @@ gst_rtp_h265_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
           /* and assemble in the adapter */
           gst_adapter_push (rtph265depay->adapter, outbuf);
         } else {
+          if (rtph265depay->current_fu_type == 0) {
+            /* previous FU packet missing start bit? */
+            GST_WARNING_OBJECT (rtph265depay, "missing FU start bit on an "
+                "earlier packet. Dropping.");
+            gst_adapter_clear (rtph265depay->adapter);
+            return NULL;
+          }
+          if (gst_rtp_buffer_compare_seqnum (rtph265depay->last_fu_seqnum,
+                  gst_rtp_buffer_get_seq (rtp)) != 1) {
+            /* jump in sequence numbers within an FU is cause for discarding */
+            GST_WARNING_OBJECT (rtph265depay, "Jump in sequence numbers from "
+                "%u to %u within Fragmentation Unit. Data was lost, dropping "
+                "stored.", rtph265depay->last_fu_seqnum,
+                gst_rtp_buffer_get_seq (rtp));
+            gst_adapter_clear (rtph265depay->adapter);
+            return NULL;
+          }
+          rtph265depay->last_fu_seqnum = gst_rtp_buffer_get_seq (rtp);
 
           GST_DEBUG_OBJECT (rtph265depay,
               "Following part of Fragmentation Unit");

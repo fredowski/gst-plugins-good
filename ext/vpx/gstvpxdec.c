@@ -79,7 +79,7 @@ gst_vpx_dec_post_processing_flags_get_type (void)
     {C_FLAGS (VP8_MFQE), "Multi-frame quality enhancement", "mfqe"},
     {0, NULL, NULL}
   };
-  static volatile GType id = 0;
+  static GType id = 0;
 
   if (g_once_init_enter ((gsize *) & id)) {
     GType _id;
@@ -188,6 +188,9 @@ gst_vpx_dec_class_init (GstVPXDecClass * klass)
       GST_DEBUG_FUNCPTR (gst_vpx_dec_default_frame_format);
 
   GST_DEBUG_CATEGORY_INIT (gst_vpxdec_debug, "vpxdec", 0, "VPX Decoder");
+
+  gst_type_mark_as_plugin_api (GST_VPX_DEC_TYPE_POST_PROCESSING_FLAGS, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_VPX_DEC, 0);
 }
 
 static void
@@ -584,6 +587,14 @@ gst_vpx_dec_open_codec (GstVPXDec * dec, GstVideoCodecFrame * frame)
   }
   if (!stream_info.is_kf) {
     GST_WARNING_OBJECT (dec, "No keyframe, skipping");
+    return GST_FLOW_CUSTOM_SUCCESS_1;
+  }
+  if (stream_info.w == 0 || stream_info.h == 0) {
+    /* For VP8 it's possible to signal width or height to be 0, but it does
+     * not make sense to do so. For VP9 it's impossible. Hence, we most likely
+     * have a corrupt stream if width or height is 0. */
+    GST_INFO_OBJECT (dec, "Invalid resolution %d x %d", stream_info.w,
+        stream_info.h);
     return GST_FLOW_CUSTOM_SUCCESS_1;
   }
 

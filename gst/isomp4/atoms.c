@@ -54,10 +54,11 @@
  * Creates a new AtomsContext for the given flavor.
  */
 AtomsContext *
-atoms_context_new (AtomsTreeFlavor flavor)
+atoms_context_new (AtomsTreeFlavor flavor, gboolean force_create_timecode_trak)
 {
   AtomsContext *context = g_new0 (AtomsContext, 1);
   context->flavor = flavor;
+  context->force_create_timecode_trak = force_create_timecode_trak;
   return context;
 }
 
@@ -494,6 +495,34 @@ atom_gmhd_free (AtomGMHD * gmhd)
 }
 
 static void
+atom_nmhd_init (AtomNMHD * nmhd)
+{
+  atom_header_set (&nmhd->header, FOURCC_nmhd, 0, 0);
+  nmhd->flags = 0;
+}
+
+static void
+atom_nmhd_clear (AtomNMHD * nmhd)
+{
+  atom_clear (&nmhd->header);
+}
+
+static AtomNMHD *
+atom_nmhd_new (void)
+{
+  AtomNMHD *nmhd = g_new0 (AtomNMHD, 1);
+  atom_nmhd_init (nmhd);
+  return nmhd;
+}
+
+static void
+atom_nmhd_free (AtomNMHD * nmhd)
+{
+  atom_nmhd_clear (nmhd);
+  g_free (nmhd);
+}
+
+static void
 atom_sample_entry_init (SampleTableEntry * se, guint32 type)
 {
   atom_header_set (&se->header, type, 0, 0);
@@ -735,6 +764,8 @@ atom_ctts_free (AtomCTTS * ctts)
   g_free (ctts);
 }
 
+/* svmi is specified in ISO 23000-11 (Stereoscopic video application format)
+ * MPEG-A */
 static void
 atom_svmi_init (AtomSVMI * svmi)
 {
@@ -819,6 +850,9 @@ atom_co64_init (AtomSTCO64 * co64)
   guint8 flags[3] = { 0, 0, 0 };
 
   atom_full_init (&co64->header, FOURCC_stco, 0, 0, 0, flags);
+
+  co64->chunk_offset = 0;
+  co64->max_offset = 0;
   atom_array_init (&co64->entries, 256);
 }
 
@@ -1128,6 +1162,10 @@ atom_minf_clear_handlers (AtomMINF * minf)
   if (minf->gmhd) {
     atom_gmhd_free (minf->gmhd);
     minf->gmhd = NULL;
+  }
+  if (minf->nmhd) {
+    atom_nmhd_free (minf->nmhd);
+    minf->nmhd = NULL;
   }
 }
 
@@ -1955,6 +1993,21 @@ atom_gmhd_copy_data (AtomGMHD * gmhd, guint8 ** buffer, guint64 * size,
   return original_offset - *offset;
 }
 
+static guint64
+atom_nmhd_copy_data (AtomNMHD * nmhd, guint8 ** buffer, guint64 * size,
+    guint64 * offset)
+{
+  guint64 original_offset = *offset;
+
+  if (!atom_copy_data (&nmhd->header, buffer, size, offset)) {
+    return 0;
+  }
+  prop_copy_uint32 (nmhd->flags, buffer, size, offset);
+
+  atom_write_size (buffer, size, offset, original_offset);
+  return original_offset - *offset;
+}
+
 static gboolean
 atom_url_same_file_flag (AtomURL * url)
 {
@@ -2368,7 +2421,17 @@ atom_stco64_copy_data (AtomSTCO64 * stco64, guint8 ** buffer, guint64 * size,
 {
   guint64 original_offset = *offset;
   guint i;
-  gboolean trunc_to_32 = stco64->header.header.type == FOURCC_stco;
+
+  /* If any (mdat-relative) offset will by over 32-bits when converted to an
+   * absolute file offset then we need to write a 64-bit co64 atom, otherwise
+   * we can write a smaller stco 32-bit table */
+  gboolean write_stco64 =
+      (stco64->max_offset + stco64->chunk_offset) > G_MAXUINT32;
+
+  if (write_stco64)
+    stco64->header.header.type = FOURCC_co64;
+  else
+    stco64->header.header.type = FOURCC_stco;
 
   if (!atom_full_copy_data (&stco64->header, buffer, size, offset)) {
     return 0;
@@ -2384,10 +2447,10 @@ atom_stco64_copy_data (AtomSTCO64 * stco64, guint8 ** buffer, guint64 * size,
     guint64 value =
         atom_array_index (&stco64->entries, i) + stco64->chunk_offset;
 
-    if (trunc_to_32) {
-      prop_copy_uint32 ((guint32) value, buffer, size, offset);
-    } else {
+    if (write_stco64) {
       prop_copy_uint64 (value, buffer, size, offset);
+    } else {
+      prop_copy_uint32 ((guint32) value, buffer, size, offset);
     }
   }
 
@@ -2618,6 +2681,10 @@ atom_minf_copy_data (AtomMINF * minf, guint8 ** buffer, guint64 * size,
     }
   } else if (minf->gmhd) {
     if (!atom_gmhd_copy_data (minf->gmhd, buffer, size, offset)) {
+      return 0;
+    }
+  } else if (minf->nmhd) {
+    if (!atom_nmhd_copy_data (minf->nmhd, buffer, size, offset)) {
       return 0;
     }
   }
@@ -3109,8 +3176,8 @@ atom_stco64_add_entry (AtomSTCO64 * stco64, guint64 entry)
     return FALSE;
 
   atom_array_append (&stco64->entries, entry, 256);
-  if (entry > G_MAXUINT32)
-    stco64->header.header.type = FOURCC_co64;
+  if (entry > stco64->max_offset)
+    stco64->max_offset = entry;
 
   return TRUE;
 }
@@ -4076,24 +4143,36 @@ atom_trak_set_timecode_type (AtomTRAK * trak, AtomsContext * context,
     guint32 trak_timescale, GstVideoTimeCode * tc)
 {
   SampleTableEntryTMCD *ste;
-  AtomGMHD *gmhd = trak->mdia.minf.gmhd;
 
-  if (context->flavor != ATOMS_TREE_FLAVOR_MOV) {
+  if (context->flavor != ATOMS_TREE_FLAVOR_MOV &&
+      !context->force_create_timecode_trak) {
     return NULL;
   }
 
+
+  if (context->flavor == ATOMS_TREE_FLAVOR_MOV) {
+    AtomGMHD *gmhd = trak->mdia.minf.gmhd;
+
+    gmhd = atom_gmhd_new ();
+    gmhd->gmin.graphics_mode = 0x0040;
+    gmhd->gmin.opcolor[0] = 0x8000;
+    gmhd->gmin.opcolor[1] = 0x8000;
+    gmhd->gmin.opcolor[2] = 0x8000;
+    gmhd->tmcd = atom_tmcd_new ();
+    gmhd->tmcd->tcmi.text_size = 12;
+    gmhd->tmcd->tcmi.font_name = g_strdup ("Chicago");  /* Pascal string */
+
+    trak->mdia.minf.gmhd = gmhd;
+  } else if (context->force_create_timecode_trak) {
+    AtomNMHD *nmhd = trak->mdia.minf.nmhd;
+    /* MOV files use GMHD, other files use NMHD */
+
+    nmhd = atom_nmhd_new ();
+    trak->mdia.minf.nmhd = nmhd;
+  } else {
+    return NULL;
+  }
   ste = atom_trak_add_timecode_entry (trak, context, trak_timescale, tc);
-
-  gmhd = atom_gmhd_new ();
-  gmhd->gmin.graphics_mode = 0x0040;
-  gmhd->gmin.opcolor[0] = 0x8000;
-  gmhd->gmin.opcolor[1] = 0x8000;
-  gmhd->gmin.opcolor[2] = 0x8000;
-  gmhd->tmcd = atom_tmcd_new ();
-  gmhd->tmcd->tcmi.text_size = 12;
-  gmhd->tmcd->tcmi.font_name = g_strdup ("Chicago");    /* Pascal string */
-
-  trak->mdia.minf.gmhd = gmhd;
   trak->is_video = FALSE;
   trak->is_h264 = FALSE;
 
@@ -4194,7 +4273,8 @@ build_colr_extension (const GstVideoColorimetry * colorimetry, gboolean is_mp4)
   guint16 matrix;
 
   primaries = gst_video_color_primaries_to_iso (colorimetry->primaries);
-  transfer_function = gst_video_color_transfer_to_iso (colorimetry->transfer);
+  transfer_function =
+      gst_video_transfer_function_to_iso (colorimetry->transfer);
   matrix = gst_video_color_matrix_to_iso (colorimetry->matrix);
 
   atom_data_alloc_mem (atom_data, 10 + (is_mp4 ? 1 : 0));

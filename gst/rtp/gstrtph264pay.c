@@ -33,6 +33,7 @@
 
 #include "gstrtph264pay.h"
 #include "gstrtputils.h"
+#include "gstbuffermemory.h"
 
 
 #define IDR_TYPE_ID    5
@@ -98,7 +99,7 @@ GST_STATIC_PAD_TEMPLATE ("src",
 
 #define DEFAULT_SPROP_PARAMETER_SETS    NULL
 #define DEFAULT_CONFIG_INTERVAL         0
-#define DEFAULT_AGGREGATE_MODE          GST_RTP_H264_AGGREGATE_ZERO_LATENCY
+#define DEFAULT_AGGREGATE_MODE          GST_RTP_H264_AGGREGATE_NONE
 
 enum
 {
@@ -166,12 +167,25 @@ gst_rtp_h264_pay_class_init (GstRtpH264PayClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
       );
 
+  /**
+   * GstRtpH264Pay:aggregate-mode
+   *
+   * Bundle suitable SPS/PPS NAL units into STAP-A aggregate packets.
+   *
+   * This can potentially reduce RTP packetization overhead but not all
+   * RTP implementations handle it correctly.
+   *
+   * For best compatibility, it is recommended to set this to "none" (the
+   * default) for RTSP and for WebRTC to "zero-latency".
+   *
+   * Since: 1.18
+   */
   g_object_class_install_property (G_OBJECT_CLASS (klass),
       PROP_AGGREGATE_MODE,
       g_param_spec_enum ("aggregate-mode",
           "Attempt to use aggregate packets",
           "Bundle suitable SPS/PPS NAL units into STAP-A "
-          "aggregate packets. ",
+          "aggregate packets",
           GST_TYPE_RTP_H264_AGGREGATE_MODE,
           DEFAULT_AGGREGATE_MODE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
       );
@@ -198,6 +212,8 @@ gst_rtp_h264_pay_class_init (GstRtpH264PayClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (rtph264pay_debug, "rtph264pay", 0,
       "H264 RTP Payloader");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_RTP_H264_AGGREGATE_MODE, 0);
 }
 
 static void
@@ -1342,7 +1358,6 @@ gst_rtp_h264_pay_handle_buffer (GstRTPBasePayload * basepayload,
   GstFlowReturn ret;
   gsize size;
   guint nal_len, i;
-  GstMapInfo map;
   const guint8 *data;
   GstClockTime dts, pts;
   GArray *nal_queue;
@@ -1364,16 +1379,6 @@ gst_rtp_h264_pay_handle_buffer (GstRTPBasePayload * basepayload,
     /* In AVC mode, there is no adapter, so nothing to drain */
     if (draining)
       return GST_FLOW_OK;
-    gst_buffer_map (buffer, &map, GST_MAP_READ);
-    data = map.data;
-    size = map.size;
-    pts = GST_BUFFER_PTS (buffer);
-    dts = GST_BUFFER_DTS (buffer);
-    rtph264pay->delta_unit = GST_BUFFER_FLAG_IS_SET (buffer,
-        GST_BUFFER_FLAG_DELTA_UNIT);
-    rtph264pay->discont = GST_BUFFER_IS_DISCONT (buffer);
-    marker = GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_MARKER);
-    GST_DEBUG_OBJECT (basepayload, "got %" G_GSIZE_FORMAT " bytes", size);
   } else {
     if (buffer) {
       if (!GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT)) {
@@ -1417,29 +1422,43 @@ gst_rtp_h264_pay_handle_buffer (GstRTPBasePayload * basepayload,
 
   /* now loop over all NAL units and put them in a packet */
   if (avc) {
+    GstBufferMemoryMap memory;
+    gsize remaining_buffer_size;
     guint nal_length_size;
     gsize offset = 0;
 
+    gst_buffer_memory_map (buffer, &memory);
+    remaining_buffer_size = gst_buffer_get_size (buffer);
+
+    pts = GST_BUFFER_PTS (buffer);
+    dts = GST_BUFFER_DTS (buffer);
+    rtph264pay->delta_unit = GST_BUFFER_FLAG_IS_SET (buffer,
+        GST_BUFFER_FLAG_DELTA_UNIT);
+    rtph264pay->discont = GST_BUFFER_IS_DISCONT (buffer);
+    marker = GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_MARKER);
+    GST_DEBUG_OBJECT (basepayload, "got %" G_GSIZE_FORMAT " bytes",
+        remaining_buffer_size);
+
     nal_length_size = rtph264pay->nal_length_size;
 
-    while (size > nal_length_size) {
+    while (remaining_buffer_size > nal_length_size) {
       gint i;
       gboolean end_of_au = FALSE;
 
       nal_len = 0;
       for (i = 0; i < nal_length_size; i++) {
-        nal_len = ((nal_len << 8) + data[i]);
+        nal_len = (nal_len << 8) + *memory.data;
+        if (!gst_buffer_memory_advance_bytes (&memory, 1))
+          break;
       }
 
-      /* skip the length bytes, make sure we don't run past the buffer size */
-      data += nal_length_size;
       offset += nal_length_size;
-      size -= nal_length_size;
+      remaining_buffer_size -= nal_length_size;
 
-      if (size >= nal_len) {
+      if (remaining_buffer_size >= nal_len) {
         GST_DEBUG_OBJECT (basepayload, "got NAL of size %u", nal_len);
       } else {
-        nal_len = size;
+        nal_len = remaining_buffer_size;
         GST_DEBUG_OBJECT (basepayload, "got incomplete NAL of size %u",
             nal_len);
       }
@@ -1447,7 +1466,7 @@ gst_rtp_h264_pay_handle_buffer (GstRTPBasePayload * basepayload,
       /* If we're at the end of the buffer, then we're at the end of the
        * access unit
        */
-      if (size - nal_len <= nal_length_size) {
+      if (remaining_buffer_size - nal_len <= nal_length_size) {
         if (rtph264pay->alignment == GST_H264_ALIGNMENT_AU || marker)
           end_of_au = TRUE;
       }
@@ -1469,10 +1488,19 @@ gst_rtp_h264_pay_handle_buffer (GstRTPBasePayload * basepayload,
       if (ret != GST_FLOW_OK)
         break;
 
-      data += nal_len;
+      /* Skip current nal. If it is split over multiple GstMemory
+       * advance_bytes () will switch to the correct GstMemory. The payloader
+       * does not access those bytes directly but uses gst_buffer_copy_region ()
+       * to create a sub-buffer referencing the nal instead */
+      if (!gst_buffer_memory_advance_bytes (&memory, nal_len))
+        break;
+
       offset += nal_len;
-      size -= nal_len;
+      remaining_buffer_size -= nal_len;
     }
+
+    gst_buffer_memory_unmap (&memory);
+    gst_buffer_unref (buffer);
   } else {
     guint next;
     gboolean update = FALSE;
@@ -1638,10 +1666,7 @@ gst_rtp_h264_pay_handle_buffer (GstRTPBasePayload * basepayload,
 
 
 done:
-  if (avc) {
-    gst_buffer_unmap (buffer, &map);
-    gst_buffer_unref (buffer);
-  } else {
+  if (!avc) {
     gst_adapter_unmap (rtph264pay->adapter);
   }
 

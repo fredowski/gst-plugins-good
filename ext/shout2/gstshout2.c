@@ -94,11 +94,18 @@ enum
 #else
 #define WEBM_CAPS ""
 #endif
+
+#define SHOUT2SEND_BASIC_CAPS "application/ogg; audio/ogg; video/ogg; "\
+    "audio/mpeg, mpegversion = (int) 1, layer = (int) [ 1, 3 ]"
+
+#define SHOUT2SEND_DOC_CAPS SHOUT2SEND_BASIC_CAPS "; video/webm; audio/webm"
+
+#define SHOUT2SEND_CAPS SHOUT2SEND_BASIC_CAPS WEBM_CAPS
+
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS ("application/ogg; audio/ogg; video/ogg; "
-        "audio/mpeg, mpegversion = (int) 1, layer = (int) [ 1, 3 ]" WEBM_CAPS));
+    GST_STATIC_CAPS (SHOUT2SEND_CAPS));
 
 static void gst_shout2send_finalize (GstShout2send * shout2send);
 
@@ -151,6 +158,8 @@ gst_shout2send_class_init (GstShout2sendClass * klass)
   GObjectClass *gobject_class;
   GstElementClass *gstelement_class;
   GstBaseSinkClass *gstbasesink_class;
+  GstPadTemplate *tmpl;
+  GstCaps *doc_caps;
 
   gobject_class = (GObjectClass *) klass;
   gstelement_class = (GstElementClass *) klass;
@@ -220,8 +229,7 @@ gst_shout2send_class_init (GstShout2sendClass * klass)
   /* signals */
   gst_shout2send_signals[SIGNAL_CONNECTION_PROBLEM] =
       g_signal_new ("connection-problem", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_CLEANUP, G_STRUCT_OFFSET (GstShout2sendClass,
-          connection_problem), NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+      G_SIGNAL_RUN_CLEANUP, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
 
   gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_shout2send_start);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_shout2send_stop);
@@ -232,7 +240,13 @@ gst_shout2send_class_init (GstShout2sendClass * klass)
   gstbasesink_class->event = GST_DEBUG_FUNCPTR (gst_shout2send_event);
   gstbasesink_class->set_caps = GST_DEBUG_FUNCPTR (gst_shout2send_setcaps);
 
-  gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
+  tmpl = gst_static_pad_template_get (&sink_template);
+  gst_element_class_add_pad_template (gstelement_class, tmpl);
+
+  /* our caps depend on the libshout2 version */
+  doc_caps = gst_caps_from_string (SHOUT2SEND_DOC_CAPS);
+  gst_pad_template_set_documentation_caps (tmpl, doc_caps);
+  gst_clear_caps (&doc_caps);
 
   gst_element_class_set_static_metadata (gstelement_class,
       "Icecast network sink",
@@ -242,6 +256,8 @@ gst_shout2send_class_init (GstShout2sendClass * klass)
       "Zaheer Abbas Merali <zaheerabbas at merali dot org>");
 
   GST_DEBUG_CATEGORY_INIT (shout2_debug, "shout2", 0, "shout2send element");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_SHOUT_PROTOCOL, 0);
 }
 
 static void
@@ -551,7 +567,13 @@ gst_shout2send_connect (GstShout2send * sink)
   ret = shout_open (sink->conn);
 
   /* wait for connection or timeout */
+#ifdef SHOUTERR_RETRY
+  /* starting with libshout 2.4.2, shout_open() has broken API + ABI and
+   * can also return SHOUTERR_RETRY (a new define) to mean "try again" */
+  while (ret == SHOUTERR_BUSY || ret == SHOUTERR_RETRY) {
+#else
   while (ret == SHOUTERR_BUSY) {
+#endif
     if (gst_util_get_timestamp () - start_ts > sink->timeout * GST_MSECOND) {
       goto connection_timeout;
     }

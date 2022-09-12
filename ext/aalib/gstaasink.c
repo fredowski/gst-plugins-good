@@ -225,6 +225,9 @@ gst_aasink_class_init (GstAASinkClass * klass)
       GST_DEBUG_FUNCPTR (gst_aasink_propose_allocation);
 
   gstvideosink_class->show_frame = GST_DEBUG_FUNCPTR (gst_aasink_show_frame);
+
+  gst_type_mark_as_plugin_api (GST_TYPE_AADRIVERS, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_AADITHER, 0);
 }
 
 static GstCaps *

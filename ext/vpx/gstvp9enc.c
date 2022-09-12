@@ -29,10 +29,10 @@
  * [Google](http://www.google.com/). It's the successor of On2 VP3, which was
  * the base of the Theora video codec.
  *
- * To control the quality of the encoding, the #GstVP9Enc:target-bitrate,
- * #GstVP9Enc:min-quantizer, #GstVP9Enc:max-quantizer or #GstVP9Enc:cq-level
+ * To control the quality of the encoding, the #GstVPXEnc:target-bitrate,
+ * #GstVPXEnc:min-quantizer, #GstVPXEnc:max-quantizer or #GstVPXEnc:cq-level
  * properties can be used. Which one is used depends on the mode selected by
- * the #GstVP9Enc:end-usage property.
+ * the #GstVPXEnc:end-usage property.
  * See [Encoder Parameters](http://www.webmproject.org/docs/encoder-parameters/)
  * for explanation, examples for useful encoding parameters and more details
  * on the encoding parameters.
@@ -101,6 +101,8 @@ static GstFlowReturn gst_vp9_enc_handle_invisible_frame_buffer (GstVPXEnc * enc,
 static void gst_vp9_enc_set_frame_user_data (GstVPXEnc * enc,
     GstVideoCodecFrame * frame, vpx_image_t * image);
 
+#define DEFAULT_BITS_PER_PIXEL 0.0289
+
 static void
 gst_vp9_enc_class_init (GstVP9EncClass * klass)
 {
@@ -152,6 +154,7 @@ gst_vp9_enc_init (GstVP9Enc * gst_vp9_enc)
   } else {
     gst_vpx_enc->have_default_config = TRUE;
   }
+  gst_vpx_enc->bits_per_pixel = DEFAULT_BITS_PER_PIXEL;
 }
 
 static vpx_codec_iface_t *

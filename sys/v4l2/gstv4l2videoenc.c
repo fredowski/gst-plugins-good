@@ -110,11 +110,12 @@ static gboolean
 gst_v4l2_video_enc_open (GstVideoEncoder * encoder)
 {
   GstV4l2VideoEnc *self = GST_V4L2_VIDEO_ENC (encoder);
+  GstV4l2Error error = GST_V4L2_ERROR_INIT;
   GstCaps *codec_caps;
 
   GST_DEBUG_OBJECT (self, "Opening");
 
-  if (!gst_v4l2_object_open (self->v4l2output))
+  if (!gst_v4l2_object_open (self->v4l2output, &error))
     goto failure;
 
   if (!gst_v4l2_object_open_shared (self->v4l2capture, self->v4l2output))
@@ -158,6 +159,8 @@ failure:
 
   gst_caps_replace (&self->probed_srccaps, NULL);
   gst_caps_replace (&self->probed_sinkcaps, NULL);
+
+  gst_v4l2_error (self, &error);
 
   return FALSE;
 }
@@ -530,6 +533,9 @@ gst_v4l2_video_enc_negotiate (GstVideoEncoder * encoder)
   if (self->input_state)
     return TRUE;
 
+  if (!codec)
+    goto done;
+
   allowed_caps = gst_pad_get_allowed_caps (GST_VIDEO_ENCODER_SRC_PAD (encoder));
 
   if (allowed_caps) {
@@ -545,6 +551,9 @@ gst_v4l2_video_enc_negotiate (GstVideoEncoder * encoder)
     if (gst_caps_foreach (allowed_caps, negotiate_profile_and_level, &ctx)) {
       goto no_profile_level;
     }
+
+    gst_caps_unref (allowed_caps);
+    allowed_caps = NULL;
   }
 
   if (codec->profile_cid && !ctx.profile) {
@@ -581,6 +590,7 @@ gst_v4l2_video_enc_negotiate (GstVideoEncoder * encoder)
   if (codec->level_cid)
     gst_structure_set (s, "level", G_TYPE_STRING, ctx.level, NULL);
 
+done:
   if (!GST_VIDEO_ENCODER_CLASS (parent_class)->negotiate (encoder))
     return FALSE;
 
@@ -728,10 +738,13 @@ gst_v4l2_video_enc_handle_frame (GstVideoEncoder * encoder,
   if (task_state == GST_TASK_STOPPED || task_state == GST_TASK_PAUSED) {
     GstBufferPool *pool = GST_BUFFER_POOL (self->v4l2output->pool);
 
-    /* It possible that the processing thread stopped due to an error */
+    /* It is possible that the processing thread stopped due to an error or
+     * when the last buffer has been met during the draining process. */
     if (self->output_flow != GST_FLOW_OK &&
-        self->output_flow != GST_FLOW_FLUSHING) {
-      GST_DEBUG_OBJECT (self, "Processing loop stopped with error, leaving");
+        self->output_flow != GST_FLOW_FLUSHING &&
+        self->output_flow != GST_V4L2_FLOW_LAST_BUFFER) {
+      GST_DEBUG_OBJECT (self, "Processing loop stopped with error: %s, leaving",
+          gst_flow_get_name (self->output_flow));
       ret = self->output_flow;
       goto drop;
     }
@@ -739,7 +752,8 @@ gst_v4l2_video_enc_handle_frame (GstVideoEncoder * encoder,
     /* Ensure input internal pool is active */
     if (!gst_buffer_pool_is_active (pool)) {
       GstStructure *config = gst_buffer_pool_get_config (pool);
-      guint min = MAX (self->v4l2output->min_buffers, GST_V4L2_MIN_BUFFERS);
+      guint min = MAX (self->v4l2output->min_buffers,
+          GST_V4L2_MIN_BUFFERS (self->v4l2output));
 
       gst_buffer_pool_config_set_params (config, self->input_state->caps,
           self->v4l2output->info.size, min, min);
@@ -1173,22 +1187,21 @@ gst_v4l2_video_enc_register (GstPlugin * plugin, GType type,
   GType subtype;
   gchar *type_name;
   GstV4l2VideoEncCData *cdata;
-
-  if (codec != NULL && video_fd != -1) {
-    GValue *value = gst_v4l2_codec_probe_levels (codec, video_fd);
-    if (value != NULL) {
-      gst_caps_set_value (src_caps, "level", value);
-      g_value_unset (value);
-    }
-
-    value = gst_v4l2_codec_probe_profiles (codec, video_fd);
-    if (value != NULL) {
-      gst_caps_set_value (src_caps, "profile", value);
-      g_value_unset (value);
-    }
-  }
+  GValue value = G_VALUE_INIT;
 
   filtered_caps = gst_caps_intersect (src_caps, codec_caps);
+
+  if (codec != NULL && video_fd != -1) {
+    if (gst_v4l2_codec_probe_levels (codec, video_fd, &value)) {
+      gst_caps_set_value (filtered_caps, "level", &value);
+      g_value_unset (&value);
+    }
+
+    if (gst_v4l2_codec_probe_profiles (codec, video_fd, &value)) {
+      gst_caps_set_value (filtered_caps, "profile", &value);
+      g_value_unset (&value);
+    }
+  }
 
   cdata = g_new0 (GstV4l2VideoEncCData, 1);
   cdata->device = g_strdup (device_path);
