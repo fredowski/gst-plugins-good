@@ -31,8 +31,8 @@ G_BEGIN_DECLS
 GstGLDisplay * gst_qt_get_gl_display ();
 gboolean       gst_qt_get_gl_wrapcontext (GstGLDisplay * display,
     GstGLContext **wrap_glcontext, GstGLContext **context, void * wgl_device);
-
+G_END_DECLS
 QVariant       qt_opengl_native_context_from_gst_gl_context     (GstGLContext * context);
 
-G_END_DECLS
+
 #endif /* __QT_GL_UTILS_H__ */
